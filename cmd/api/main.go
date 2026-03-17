@@ -23,7 +23,7 @@ func main() {
 		log.Fatalf("Could not connect to database: %v", err)
 	}
 
-	r := router.SetupRouter(db)
+	r := router.SetupRouter(db, cfg)
 
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%s", cfg.AppPort),
