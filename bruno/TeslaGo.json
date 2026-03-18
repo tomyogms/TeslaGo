@@ -1,0 +1,215 @@
+{
+  "version": "1",
+  "name": "TeslaGo",
+  "type": "collection",
+  "ignore": [],
+  "items": [
+    {
+      "uid": "health-check",
+      "name": "Health Check",
+      "type": "http",
+      "seq": 1,
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/health",
+        "headers": [],
+        "params": [],
+        "body": {
+          "mode": "none"
+        },
+        "docs": "Returns the health of the API and database connection.\n\nExpected response:\n{\n  \"status\": \"healthy\",\n  \"database\": { \"status\": \"up\" }\n}\n\nIf the database is down, returns HTTP 503."
+      }
+    },
+    {
+      "uid": "tesla-auth-url",
+      "name": "Get Tesla Auth URL",
+      "type": "http",
+      "seq": 2,
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/tesla/auth/url",
+        "headers": [],
+        "params": [
+          {
+            "name": "admin_id",
+            "value": "admin-1",
+            "description": "The ID of the admin who is linking their Tesla account. Must be unique per admin.",
+            "enabled": true
+          }
+        ],
+        "body": {
+          "mode": "none"
+        },
+        "docs": "Step 1 of the Tesla OAuth flow.\n\nReturns a Tesla login URL that the admin must visit in their browser.\nThe URL includes a PKCE code challenge and a state token (stored in memory server-side).\n\nExpected response:\n{\n  \"url\": \"https://auth.tesla.com/oauth2/v3/authorize?...\"\n}\n\nOpen the returned URL in a browser, log in with the Tesla account, and approve access.\nTesla will redirect to the TESLA_REDIRECT_URI with ?code=...&state=... appended."
+      }
+    },
+    {
+      "uid": "tesla-auth-callback",
+      "name": "Tesla Auth Callback",
+      "type": "http",
+      "seq": 3,
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/tesla/auth/callback",
+        "headers": [],
+        "params": [
+          {
+            "name": "code",
+            "value": "REPLACE_WITH_CODE_FROM_TESLA_REDIRECT",
+            "description": "The authorization code Tesla appends to the redirect URL after the admin approves access.",
+            "enabled": true
+          },
+          {
+            "name": "state",
+            "value": "REPLACE_WITH_STATE_FROM_TESLA_REDIRECT",
+            "description": "The opaque state token from the Tesla redirect. Must match the one generated in Step 1 (PKCE anti-CSRF).",
+            "enabled": true
+          }
+        ],
+        "body": {
+          "mode": "none"
+        },
+        "docs": "Step 2 of the Tesla OAuth flow. Normally called automatically by Tesla's redirect — you do not need to call this manually.\n\nThis handler:\n1. Validates the state token (anti-CSRF check)\n2. Exchanges the authorization code for access + refresh tokens using PKCE\n3. Encrypts tokens with AES-256-GCM and saves them to the database\n4. Syncs the admin's vehicles from the Tesla API into the DB\n\nExpected response:\n{\n  \"message\": \"Tesla account linked successfully\",\n  \"vehicles_synced\": 2\n}"
+      }
+    },
+    {
+      "uid": "tesla-list-vehicles",
+      "name": "List Tesla Vehicles",
+      "type": "http",
+      "seq": 4,
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/tesla/vehicles",
+        "headers": [],
+        "params": [
+          {
+            "name": "admin_id",
+            "value": "admin-1",
+            "description": "The ID of the admin whose linked vehicles to list.",
+            "enabled": true
+          }
+        ],
+        "body": {
+          "mode": "none"
+        },
+        "docs": "Lists all Tesla vehicles linked to an admin account (read from the database — no live Tesla API call).\n\nIMPORTANT: The 'id' field in each vehicle object is the INTERNAL database ID.\nUse this 'id' as the :vehicleID path parameter in all subsequent battery/charging requests.\nDo NOT use Tesla's external vehicle_id field.\n\nExpected response:\n[\n  {\n    \"id\": 1,\n    \"admin_id\": \"admin-1\",\n    \"vehicle_id\": 1234567890,\n    \"vin\": \"5YJ3E1EA1NF000001\",\n    \"display_name\": \"My Model 3\"\n  }\n]"
+      }
+    },
+    {
+      "uid": "tesla-battery-status",
+      "name": "Get Live Battery Status",
+      "type": "http",
+      "seq": 5,
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/tesla/vehicles/1/battery",
+        "headers": [],
+        "params": [
+          {
+            "name": "admin_id",
+            "value": "admin-1",
+            "description": "The ID of the admin who owns this vehicle.",
+            "enabled": true
+          }
+        ],
+        "body": {
+          "mode": "none"
+        },
+        "docs": "Fetches LIVE battery status directly from the Tesla API and saves a snapshot to the database.\n\nREPLACE '1' in the URL with the internal DB vehicle id from 'List Tesla Vehicles'.\n\nThis call wakes the vehicle if asleep (costs ~$0.02 per wake at Tesla API rates).\nIf the car is asleep and cannot be woken, returns HTTP 503.\n\nReturned fields include:\n- battery_level (0-100)\n- battery_range (miles)\n- charging_state (Charging / Complete / Disconnected / Stopped)\n- charge_rate (mph)\n- charger_voltage\n- charger_actual_current\n- charge_limit_soc\n- time_to_full_charge (hours)\n- charge_energy_added (kWh)"
+      }
+    },
+    {
+      "uid": "tesla-battery-history",
+      "name": "Get Battery History",
+      "type": "http",
+      "seq": 6,
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/tesla/vehicles/1/battery-history",
+        "headers": [],
+        "params": [
+          {
+            "name": "start_date",
+            "value": "2025-01-01T00:00:00Z",
+            "description": "Start of the time range (RFC3339 / ISO8601 UTC).",
+            "enabled": true
+          },
+          {
+            "name": "end_date",
+            "value": "2025-12-31T23:59:59Z",
+            "description": "End of the time range (RFC3339 / ISO8601 UTC).",
+            "enabled": true
+          }
+        ],
+        "body": {
+          "mode": "none"
+        },
+        "docs": "Returns time-series battery snapshots from the database for a given vehicle and date range.\n\nREPLACE '1' in the URL with the internal DB vehicle id from 'List Tesla Vehicles'.\n\nSnapshots are created each time 'Get Live Battery Status' is called.\nData older than 90 days is automatically pruned by POST /tesla/admin/prune."
+      }
+    },
+    {
+      "uid": "tesla-charging-logs",
+      "name": "Get Charging Logs",
+      "type": "http",
+      "seq": 7,
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/tesla/vehicles/1/charging-logs",
+        "headers": [],
+        "params": [
+          {
+            "name": "start_date",
+            "value": "2025-01-01T00:00:00Z",
+            "description": "Start of the time range (RFC3339 / ISO8601 UTC).",
+            "enabled": true
+          },
+          {
+            "name": "end_date",
+            "value": "2025-12-31T23:59:59Z",
+            "description": "End of the time range (RFC3339 / ISO8601 UTC).",
+            "enabled": true
+          },
+          {
+            "name": "limit",
+            "value": "100",
+            "description": "Maximum number of charging sessions to return. Default is 50.",
+            "enabled": true
+          }
+        ],
+        "body": {
+          "mode": "none"
+        },
+        "docs": "Returns historical charging sessions from the database.\n\nREPLACE '1' in the URL with the internal DB vehicle id from 'List Tesla Vehicles'.\n\nCharging sessions are inferred from battery snapshots: the service detects transitions\nin the charging_state field (e.g. Disconnected → Charging → Complete) across consecutive\nsnapshots to construct session records with start/end times and energy added.\n\nA session with no ended_at means the car is currently charging."
+      }
+    },
+    {
+      "uid": "tesla-admin-prune",
+      "name": "Prune Old Data",
+      "type": "http",
+      "seq": 8,
+      "request": {
+        "method": "POST",
+        "url": "{{baseUrl}}/tesla/admin/prune",
+        "headers": [],
+        "params": [],
+        "body": {
+          "mode": "none"
+        },
+        "docs": "Deletes battery snapshots and charging logs older than 90 days from the database.\n\nThis is the data retention enforcement endpoint. Call it periodically (e.g. daily via cron)\nto keep the database from growing unbounded.\n\nExpected response:\n{\n  \"message\": \"Pruned successfully\",\n  \"snapshots_deleted\": 142,\n  \"charging_logs_deleted\": 8\n}"
+      }
+    }
+  ],
+  "environments": [
+    {
+      "uid": "local",
+      "name": "Local",
+      "variables": [
+        {
+          "name": "baseUrl",
+          "value": "http://localhost:8080",
+          "enabled": true
+        }
+      ]
+    }
+  ]
+}
