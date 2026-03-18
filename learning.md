@@ -13,6 +13,7 @@ A quick reference organized by topic. As you explore TeslaGo, questions and lear
 - [Testing](#testing)
 - [Go Language Concepts](#go-language-concepts)
 - [Configuration & Deployment](#configuration--deployment)
+- [Go Package Management](#go-package-management)
 
 ---
 
@@ -575,9 +576,635 @@ db, err := database.Connect(cfg)  // Uses config
 
 ---
 
+## Go Package Management
+
+### Q: What's the difference between `go.mod` and `go.sum`?
+
+**Short Answer:**
+`go.mod` lists your direct dependencies (what you intentionally imported). `go.sum` lists ALL dependencies (direct + transitive) with cryptographic hashes to verify integrity.
+
+**Details:**
+
+**go.mod — Direct Dependencies Only:**
+```
+module github.com/tomyogms/TeslaGo
+
+go 1.26.1
+
+require (
+    github.com/gin-gonic/gin v1.12.0           ← You imported this
+    github.com/joho/godotenv v1.5.1             ← You imported this
+    github.com/onsi/ginkgo/v2 v2.28.1           ← You imported this
+    github.com/onsi/gomega v1.39.1              ← You imported this
+    gorm.io/driver/postgres v1.6.0              ← You imported this
+    gorm.io/gorm v1.31.1                        ← You imported this
+)
+```
+
+**go.sum — All Dependencies + Hashes:**
+```
+github.com/gin-gonic/gin v1.12.0 h1:b3YAbrZtnf8N//yjKeU2+MQsh2mY5htkZidOM7O0wG8=
+github.com/gin-gonic/gin v1.12.0/go.mod h1:VxccKfsSllpKshkBWgVgRniFFAzFb9csfngsqANjnLc=
+...
+(156 total entries in TeslaGo's go.sum)
+```
+
+**What These Hashes Do:**
+- Cryptographically verify each dependency's content hasn't been tampered with
+- Protect against supply-chain attacks
+- Required to be committed to git (prevents man-in-the-middle attacks)
+- Go verifies checksums on every build against `go.sum`
+
+**Key File References:**
+- `go.mod`: 6 direct dependencies in TeslaGo
+- `go.sum`: 156 total entries (6 direct + 150 transitive with dual hashes each)
+
+---
+
+### Q: What's the difference between `go.mod` and Python's requirements.txt or poetry.lock?
+
+**Short Answer:**
+Python's `requirements.txt` ≈ Go's `go.mod` (direct deps). Python's `poetry.lock` ≈ Go's `go.sum` (all deps + hashes). But Go makes `go.sum` mandatory for security.
+
+**Comparison Table:**
+
+| Feature | Python pip | Python Poetry | Go |
+|---------|-----------|----------------|-----|
+| **Direct dependencies file** | `requirements.txt` | `pyproject.toml` | `go.mod` |
+| **All dependencies locked** | `pip freeze` output (manual) | `poetry.lock` (automatic) | `go.sum` (automatic & mandatory) |
+| **Version ranges** | Yes (`^1.2`, `~1.2`) | Yes (`^1.2`, `~1.2`) | No (exact only: `v1.2.0`) |
+| **Sub-dependency resolution** | Manual or via pip | Automatic (Poetry handles it) | Automatic (Go handles it) |
+| **Checksum/Hash protection** | No (optional) | Yes (poetry.lock) | Yes (go.sum, **mandatory**) |
+| **Must commit lock file?** | Optional | Recommended | **Required** |
+
+**Key Insight:**
+Python requires you to explicitly run `pip freeze` or use Poetry to manage transitive deps. Go does this automatically — you just commit `go.sum`.
+
+---
+
+### Q: Are sub-dependencies automatically included in go.mod or do I need to manage them?
+
+**Short Answer:**
+Automatically included. When you `go get` a package, Go recursively finds all its dependencies and adds them to `go.sum`. You only manage the packages YOU import.
+
+**Example:**
+
+When TeslaGo runs `go get github.com/gin-gonic/gin v1.12.0`:
+```
+go get downloads Gin, which depends on:
+    ├─ github.com/bytedance/sonic (JSON library)
+    ├─ github.com/go-playground/validator/v10 (validation)
+    ├─ github.com/mattn/go-isatty (terminal detection)
+    └─ ... (9 more packages)
+
+All of these are automatically added to go.sum
+None of them appear in go.mod's `require` block
+```
+
+**In go.mod:**
+```
+require (
+    github.com/gin-gonic/gin v1.12.0  ← Only THIS is here
+)
+```
+
+**In go.sum:**
+```
+github.com/gin-gonic/gin v1.12.0 h1:...
+github.com/gin-gonic/gin v1.12.0/go.mod h1:...
+github.com/bytedance/sonic v1.15.0 h1:...      ← Sub-dependency
+github.com/bytedance/sonic v1.15.0/go.mod h1:... ← Sub-dependency
+...
+(all transitive dependencies are here)
+```
+
+**Why This Works:**
+Go uses **Minimal Version Selection (MVS)** — automatically picks the highest compatible version needed. No dependency hell.
+
+**Key File References:**
+- `go.mod` (lines 5-12): Only 6 direct dependencies listed
+- `go.sum` (156 lines): All transitive dependencies with hashes
+
+---
+
+### Q: How do I check what sub-dependencies a package brings in?
+
+**Short Answer:**
+Use `go mod graph` to see the full dependency tree, or `go list -m all` to list everything.
+
+**Commands:**
+
+```bash
+# Show dependency tree (what depends on what)
+go mod graph
+
+# Output example:
+# github.com/tomyogms/TeslaGo github.com/gin-gonic/gin@v1.12.0
+# github.com/gin-gonic/gin@v1.12.0 github.com/bytedance/sonic@v1.15.0
+# github.com/gin-gonic/gin@v1.12.0 github.com/go-playground/validator/v10@v10.30.1
+# ... (many more)
+```
+
+```bash
+# List all dependencies (flat list)
+go list -m all
+
+# Output example:
+# github.com/tomyogms/TeslaGo
+# github.com/Masterminds/semver/v3 v3.4.0
+# github.com/bytedance/gopkg v0.1.3
+# github.com/bytedance/sonic v1.15.0
+# ... (156 entries in TeslaGo)
+```
+
+```bash
+# Show why a specific module is needed
+go mod why github.com/bytedance/sonic
+
+# Output example:
+# github.com/tomyogms/TeslaGo
+# github.com/gin-gonic/gin@v1.12.0
+# github.com/bytedance/sonic@v1.15.0
+```
+
+---
+
+### Q: What happens if a sub-dependency has a vulnerability?
+
+**Short Answer:**
+You upgrade the direct dependency that brought it in. Go will automatically upgrade the sub-dependency to a safe version.
+
+**Real-World Scenario:**
+
+Suppose `github.com/bytedance/sonic v1.15.0` (a sub-dependency of Gin) has a security vulnerability:
+
+**Step 1: Check for updates**
+```bash
+go list -m -u github.com/gin-gonic/gin
+# Output: github.com/gin-gonic/gin v1.12.0 [v1.13.0]  ← Newer version available
+```
+
+**Step 2: Upgrade Gin (the direct dependency)**
+```bash
+go get -u github.com/gin-gonic/gin
+```
+
+Gin v1.13.0 might depend on `bytedance/sonic v1.15.1` (patched version). Go automatically resolves this.
+
+**Step 3: Run tests**
+```bash
+go test ./...
+```
+
+**What if the newer version breaks your code?**
+You have two options:
+
+**Option A: Fix your code to work with the new version**
+```bash
+go get github.com/gin-gonic/gin@v1.13.0
+# Fix your code, then test
+go test ./...
+```
+
+**Option B: Manually upgrade just the sub-dependency (if possible)**
+```bash
+# This is a workaround, not recommended:
+go get github.com/bytedance/sonic@v1.15.1
+go mod tidy
+```
+
+**Best Practice:** Always upgrade the direct dependency, not the sub-dependency directly.
+
+---
+
+### Q: What if two sub-dependencies want different versions of the same package?
+
+**Short Answer:**
+Go's Minimal Version Selection (MVS) picks the highest compatible version. It rarely conflicts, but if it does, you must upgrade one of the direct dependencies.
+
+**Example Scenario:**
+
+```
+TeslaGo requires:
+├─ Gin v1.12.0
+│  └─ depends on: Sonic >= v1.15.0
+└─ SomeOtherLib v2.0.0
+   └─ depends on: Sonic >= v1.16.0
+
+Result: Go picks Sonic v1.16.0 (highest compatible version)
+Both Gin and SomeOtherLib can use it (since they accept >= requirements)
+```
+
+**What if they're incompatible?**
+
+```
+TeslaGo requires:
+├─ OldLib v1.0.0
+│  └─ needs: JSON < v1.5.0
+└─ NewLib v2.0.0
+   └─ needs: JSON >= v2.0.0
+
+Result: Conflict! You can't use both without upgrading one.
+```
+
+**Solution:** Upgrade `OldLib` to a newer version that supports `JSON >= v2.0.0`, or remove `NewLib`.
+
+**Why This Rarely Happens in Go:**
+- Module maintainers follow semantic versioning strictly
+- Incompatibilities are rare because versions are pinned exactly (no `^` or `~`)
+- Go's MVS algorithm is designed to avoid these conflicts
+
+---
+
+### Q: What's the difference between `require` and `indirect` in go.mod?
+
+**Short Answer:**
+`require` = you directly imported this. `indirect` = this is a sub-dependency (brought in by something you imported). They're just comments for readability.
+
+**Example from TeslaGo's go.mod:**
+
+```go
+require (
+    github.com/gin-gonic/gin v1.12.0       // ← Direct: you imported Gin
+    github.com/joho/godotenv v1.5.1         // ← Direct: you imported godotenv
+    gorm.io/gorm v1.31.1                    // ← Direct: you imported GORM
+)
+
+require (
+    github.com/Masterminds/semver/v3 v3.4.0 // indirect
+    github.com/bytedance/sonic v1.15.0      // indirect
+    github.com/go-playground/validator/v10  // indirect
+    // ... more indirect dependencies
+)
+```
+
+**Why the Comments?**
+- Helps developers understand what they directly imported
+- `go mod tidy` adds the `// indirect` comment automatically
+- Doesn't affect functionality — it's purely informational
+
+**How Dependencies Get Marked as `indirect`:**
+1. You run `go get github.com/gin-gonic/gin`
+2. Gin depends on Sonic
+3. Go adds Sonic to `go.sum` but marks it `// indirect` in `go.mod`
+4. This tells you: "Your code doesn't import Sonic directly"
+
+**Key File References:**
+- `go.mod` (lines 5-12): First `require` block = direct dependencies
+- `go.mod` (lines 14-59): Second `require` block = indirect dependencies with comments
+
+---
+
+### Q: How do I add a new dependency to TeslaGo?
+
+**Short Answer:**
+Import the package in your code, then run `go get .` or `go mod tidy` to add it to `go.mod` and `go.sum`.
+
+**Step-by-Step Example:**
+
+**Step 1: Import the package in your code**
+```go
+// internal/handler/example_handler.go
+package handler
+
+import (
+    "github.com/some-org/some-package"  // ← Add this
+)
+
+func MyHandler() {
+    some-package.DoSomething()
+}
+```
+
+**Step 2: Download the dependency**
+```bash
+# Option A: Automatically discover and add all imports
+go mod tidy
+
+# Option B: Explicitly add a specific package
+go get github.com/some-org/some-package
+```
+
+**Step 3: Verify it was added**
+```bash
+cat go.mod | grep some-package
+# Output: require github.com/some-org/some-package v0.1.2
+
+cat go.sum | grep some-package
+# Output: 
+# github.com/some-org/some-package v0.1.2 h1:abc...
+# github.com/some-org/some-package v0.1.2/go.mod h1:xyz...
+```
+
+**Step 4: Run tests**
+```bash
+go test ./...
+```
+
+**Step 5: Commit both files**
+```bash
+git add go.mod go.sum
+git commit -m "add: new-package v0.1.2 for [reason]"
+```
+
+**Best Practices:**
+- Always commit both `go.mod` AND `go.sum`
+- Don't manually edit `go.mod` or `go.sum` — let `go` commands do it
+- Run `go mod tidy` before committing to remove unused dependencies
+
+---
+
+### Q: How do I upgrade a dependency?
+
+**Short Answer:**
+Use `go get -u package@version` to upgrade to a specific version, or `go get -u ./...` to upgrade all dependencies.
+
+**Commands:**
+
+**Upgrade to a specific version:**
+```bash
+go get github.com/gin-gonic/gin@v1.13.0
+# Updates go.mod and go.sum
+# Then run tests
+go test ./...
+```
+
+**Upgrade to the latest available version:**
+```bash
+go get -u github.com/gin-gonic/gin
+# Automatically picks @latest
+```
+
+**Upgrade all direct dependencies:**
+```bash
+go get -u ./...
+# Updates all dependencies to their latest compatible versions
+# Then run tests
+go test ./...
+```
+
+**Check what versions are available before upgrading:**
+```bash
+go list -m -u github.com/gin-gonic/gin
+# Output: github.com/gin-gonic/gin v1.12.0 [v1.13.0]
+#                                           ↑ Latest available
+```
+
+**After upgrading:**
+```bash
+# Always run tests
+go test ./...
+
+# Verify changes
+git diff go.mod go.sum
+```
+
+---
+
+### Q: How do I downgrade a dependency?
+
+**Short Answer:**
+Use `go get package@version` to pin to an older version. Go treats downgrades the same as upgrades.
+
+**Example: Downgrade Gin from v1.12.0 to v1.11.0**
+
+```bash
+go get github.com/gin-gonic/gin@v1.11.0
+```
+
+**Verify the downgrade:**
+```bash
+cat go.mod | grep gin-gonic/gin
+# Output: require github.com/gin-gonic/gin v1.11.0
+```
+
+**Test after downgrading:**
+```bash
+go test ./...
+```
+
+**When You Might Downgrade:**
+1. A newer version introduced a breaking change
+2. A newer version has a bug (wait for a patch)
+3. You need to be compatible with older systems
+
+**Warning:** Avoid unnecessary downgrades — they prevent security updates.
+
+---
+
+### Q: Is go.sum checked into version control? Should it be?
+
+**Short Answer:**
+Yes, **absolutely commit `go.sum` to git**. It's mandatory for security. Without it, Go can't verify that downloaded packages haven't been tampered with.
+
+**Why `go.sum` Must Be Committed:**
+
+**Scenario 1: Without go.sum committed**
+```
+Developer A: Commits code with new dependency
+              (didn't commit go.sum by mistake)
+
+Developer B: Runs go mod tidy
+              Go downloads the dependency from proxy
+              Different version hash! ⚠️ Inconsistent state
+```
+
+**Scenario 2: With go.sum committed**
+```
+Developer A: Commits code with new dependency
+              (committed go.mod and go.sum)
+
+Developer B: Runs go mod tidy
+              Go verifies that the checksum in go.sum matches
+              ✅ Guaranteed to be the same package
+```
+
+**Security Aspect:**
+```bash
+# When you build, Go checks:
+# "Is the downloaded package hash in go.sum?"
+# If NOT, build fails with error:
+# "go: verifying module: checksum mismatch"
+
+This protects against:
+- Compromised mirrors
+- Man-in-the-middle attacks
+- Supply-chain attacks
+```
+
+**File Size Note:**
+- `go.mod`: ~2 KB (small)
+- `go.sum`: ~5-10 KB per 50 dependencies (very small)
+
+**So your .gitignore should NOT have:**
+```bash
+# ❌ WRONG - Don't do this
+go.sum          # Never gitignore this!
+```
+
+**Correct .gitignore:**
+```bash
+# ✅ Correct
+# go.mod and go.sum are committed
+# Only ignore build artifacts and vendor directory if you use it
+/bin/
+/dist/
+# Vendor is optional but if used, commit it too
+```
+
+---
+
+### Q: Real-World Problem: A dependency needs a security patch but breaks my code
+
+**Short Answer:**
+Upgrade the dependency, run your tests to identify breaking changes, then fix your code. This is the only secure approach.
+
+**Scenario:**
+
+```
+Current state:
+├─ Your code uses: github.com/some-package v1.5.0
+└─ A vulnerability is discovered in v1.5.0
+   Latest patch: v1.5.1 (fixes vulnerability)
+   
+But the patch includes a breaking API change!
+Your code compiled with v1.5.0 breaks with v1.5.1
+```
+
+**Step-by-Step Solution:**
+
+**Step 1: Upgrade to the patched version**
+```bash
+go get github.com/some-package@v1.5.1
+```
+
+**Step 2: Run your tests (they will fail)**
+```bash
+go test ./...
+# Error: undefined: SomeOldFunction
+```
+
+**Step 3: Fix your code**
+```go
+// Before (v1.5.0 API)
+result := some-package.OldFunction()
+
+// After (v1.5.1 API)
+result := some-package.NewFunction()
+```
+
+**Step 4: Run tests again (they pass)**
+```bash
+go test ./...
+# ✅ All tests pass
+```
+
+**Step 5: Commit**
+```bash
+git add go.mod go.sum internal/...
+git commit -m "chore: upgrade some-package to v1.5.1 for security patch"
+```
+
+**What NOT to do:**
+
+❌ **DON'T ignore the vulnerability:**
+```bash
+# Tempting but dangerous!
+# Your code stays vulnerable and so do your users
+```
+
+❌ **DON'T manually edit go.sum:**
+```bash
+# This breaks Go's verification mechanism
+# Never edit go.sum by hand
+```
+
+❌ **DON'T downgrade to the old version:**
+```bash
+go get github.com/some-package@v1.5.0  # ❌ No! This is insecure
+```
+
+❌ **DON'T use `replace` to avoid the fix:**
+```go
+// go.mod
+replace github.com/some-package => github.com/some-package v1.4.0  // ❌ No!
+```
+
+**Best Practice:**
+Keep dependencies updated. Run `go list -m -u all` regularly to check for updates.
+
+---
+
+### Q: Can I lock all dependencies to exact versions like Python?
+
+**Short Answer:**
+Yes, Go already does this by default. Every dependency is pinned to an exact version (e.g., `v1.12.0`, not `^1.12` or `~1.12`).
+
+**How Go Does This:**
+
+**Python (version ranges):**
+```
+# requirements.txt
+flask>=2.0.0,<3.0.0   ← Range, could be 2.1, 2.5, etc.
+```
+
+**Go (exact versions only):**
+```go
+// go.mod
+require github.com/gin-gonic/gin v1.12.0   ← Exact version always
+```
+
+**Why Exact Versions?**
+- No surprises when other developers run `go mod download`
+- Reproducible builds
+- Easier to audit what changed
+
+**So TeslaGo already has perfect reproducibility:**
+```bash
+# Any developer running this on any machine gets the SAME versions
+go mod download
+go build ./cmd/api
+```
+
+**If You Need Even More Control: Vendoring**
+
+Optional vendoring (commit all dependency source code):
+```bash
+go mod vendor
+# Creates /vendor/ directory with all source code
+# Commit this to git for offline builds
+git add vendor/
+```
+
+**But this is overkill for most projects** — `go.sum` already provides all the security and reproducibility you need.
+
+---
+
+### Summary Table: Go vs Python Dependency Management
+
+| Aspect | Python pip | Python Poetry | Go |
+|--------|-----------|----------------|-----|
+| **Direct deps file** | `requirements.txt` | `pyproject.toml` | `go.mod` |
+| **Lock file** | `pip freeze` (manual) | `poetry.lock` (auto) | `go.sum` (auto + mandatory) |
+| **Version format** | Ranges (`^1.2`) | Ranges (`^1.2`) | Exact only (`v1.2.0`) |
+| **Sub-deps automatic?** | No (must freeze) | Yes | Yes |
+| **Conflict resolution** | Manual or pip | Poetry | Minimal Version Selection (MVS) |
+| **Security hashes** | Optional | Yes | Yes (mandatory) |
+| **Reproducible builds** | No (unless poetry.lock) | Yes | Yes (built-in) |
+| **Command to add dep** | `pip install pkg` | `poetry add pkg` | `go get pkg` |
+| **Command to lock** | `pip freeze` | `poetry lock` | `go mod tidy` |
+| **Transitive deps visible** | After freeze | In poetry.lock | In go.sum |
+| **Commit lock file?** | Optional | Recommended | **Required** |
+
+**Key Takeaway:**
+Go's approach is actually simpler than Python's — exact versions by default, mandatory security hashes, automatic sub-dependency resolution, and always reproducible.
+
+---
+
 ## Future Categories
 
 Add new sections as you explore:
+- [x] Go Package Management ✅
 - [ ] Error Handling
 - [ ] Authentication & Authorization
 - [ ] External APIs (Tesla)
