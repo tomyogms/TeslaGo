@@ -516,9 +516,244 @@ go build -o bin/api ./cmd/api
 
 ## Phase 2 — Battery Status & Charging Logs
 
-> Coming soon. Will cover:
-> - `GET /tesla/vehicles/{vehicleID}/battery` — current battery status
-> - `GET /tesla/vehicles/{vehicleID}/charging-logs` — historical charging sessions
-> - `GET /tesla/vehicles/{vehicleID}/battery-history` — time-series battery data
-> - `battery_snapshots` and `charging_logs` database tables
-> - 90-day data retention policy
+**Goal:** Expose current battery state and historical charging data for linked Tesla vehicles.
+Because Tesla's API has no native charging history endpoint, we build our own by polling
+`vehicle_data` on demand and inferring charging sessions from state transitions.
+
+---
+
+### 1. What Was Built
+
+| Component | File(s) | Purpose |
+|---|---|---|
+| Models | `internal/model/battery_snapshot.go`, `charging_log.go` | DB entities for snapshots and sessions |
+| Tesla Client extension | `external/tesla/client.go` | Added `GetVehicleData()`, `VehicleData`, `ChargeState` types |
+| Migrations | `migrations/003_create_battery_snapshots.sql`, `004_create_charging_logs.sql` | Reference SQL DDL |
+| Repository | `internal/repository/battery_repository.go` | All DB ops for snapshots and charging logs |
+| Service | `internal/service/battery_service.go` | Business logic, charging session inference, 90-day pruning |
+| Handler | `internal/handler/battery_handler.go` | 4 HTTP endpoints |
+| Router update | `internal/router/router.go` | Wires new components, registers routes |
+| Database update | `internal/database/database.go` | AutoMigrate for 2 new models |
+| Tests | `battery_service_test.go`, `battery_handler_test.go` | 28 service + 15 handler specs |
+
+---
+
+### 2. New HTTP Endpoints
+
+#### `GET /tesla/vehicles/:vehicleID/battery?admin_id=<id>`
+
+**"Write-through read"**: every call to this endpoint both retrieves AND records the
+current battery state. This is how we build battery history — we have no other
+mechanism to get past data from Tesla.
+
+**Flow:**
+```
+Client
+  → BatteryHandler.GetCurrentBattery
+      → TeslaRepository.GetTeslaUserByAdminID    (find the admin)
+      → TeslaRepository.GetVehiclesByTeslaUserID  (find the vehicle + Tesla external ID)
+      → TeslaAuthService.GetValidAccessToken       (auto-refreshes if near expiry)
+      → TeslaClient.GetVehicleData                 (HTTP GET to Tesla Owner API)
+      → BatteryRepository.SaveSnapshot             (persist the reading)
+      → updateChargingSession                      (infer session state change)
+  ← 200 { "snapshot": { ... } }
+```
+
+**Special case — car is asleep:**
+Tesla returns HTTP 408 when the vehicle is asleep. The client wraps this with an
+"asleep or unreachable (408)" error message. The handler detects this string and
+returns **503 Service Unavailable** rather than 500, so callers know to retry later.
+
+---
+
+#### `GET /tesla/vehicles/:vehicleID/battery-history?start_date=&end_date=`
+
+Returns stored `BatterySnapshot` rows in a time window. This is a pure database read —
+no Tesla API call is made. Dates must be in RFC3339 format (`2025-01-01T00:00:00Z`).
+
+```json
+{
+  "snapshots": [ { "battery_level": 80, "charging_state": "Disconnected", ... } ],
+  "count": 14
+}
+```
+
+---
+
+#### `GET /tesla/vehicles/:vehicleID/charging-logs?start_date=&end_date=&limit=`
+
+Returns inferred `ChargingLog` rows. Sessions are ordered newest-first. `limit` defaults
+to 100. In-progress sessions have `ended_at: null`.
+
+```json
+{
+  "charging_logs": [
+    {
+      "started_at": "2025-03-10T20:00:00Z",
+      "ended_at": "2025-03-10T22:30:00Z",
+      "start_battery_level": 30,
+      "end_battery_level": 80,
+      "energy_added": 22.5,
+      "max_charge_rate": 31.2
+    }
+  ],
+  "count": 1
+}
+```
+
+---
+
+#### `POST /tesla/admin/prune`
+
+Triggers the 90-day retention job. Deletes all `battery_snapshots` and `charging_logs`
+where the timestamp is older than 90 days. Both tables are pruned independently so a
+failure in one does not prevent the other.
+
+---
+
+### 3. Architecture Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  Phase 2 — Battery & Charging Data Flow                             │
+│                                                                     │
+│  Client                                                             │
+│    │                                                                │
+│    ▼                                                                │
+│  BatteryHandler  ──────────────────────────────────────────────┐   │
+│    │                                                            │   │
+│    │  (validates params, maps errors to status codes)          │   │
+│    ▼                                                            │   │
+│  BatteryService                                                 │   │
+│    ├── TeslaAuthService.GetValidAccessToken()  (token mgmt)    │   │
+│    ├── TeslaRepository.GetTeslaUserByAdminID() (find admin)    │   │
+│    ├── TeslaRepository.GetVehiclesByTeslaUserID() (find car)   │   │
+│    ├── TeslaClient.GetVehicleData()  ──► Tesla Owner API       │   │
+│    ├── BatteryRepository.SaveSnapshot()       (persist)        │   │
+│    └── updateChargingSession()                                  │   │
+│         ├── BatteryRepository.GetOpenChargingLog()             │   │
+│         ├── BatteryRepository.SaveChargingLog()   (start)      │   │
+│         └── BatteryRepository.UpdateChargingLog() (update/end) │   │
+│                                                                 │   │
+│  PostgreSQL                                                     │   │
+│    ├── battery_snapshots  (one row per poll)                    │   │
+│    └── charging_logs      (one row per session)                 │   │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### 4. Database Schema
+
+#### `battery_snapshots`
+
+| Column | Type | Notes |
+|---|---|---|
+| id | BIGSERIAL PK | Auto-assigned |
+| vehicle_id | BIGINT FK | → tesla_vehicles.id |
+| snapshot_at | TIMESTAMPTZ | When the reading was taken (indexed) |
+| battery_level | INT | 0–100 % |
+| battery_range | DOUBLE PRECISION | Estimated miles |
+| charging_state | VARCHAR(32) | Charging / Complete / Disconnected / Stopped |
+| charge_rate | DOUBLE PRECISION | Miles/hour added |
+| charger_voltage | INT | Volts |
+| charger_actual_current | INT | Amps |
+| charge_limit_soc | INT | Driver's target % |
+| time_to_full_charge | DOUBLE PRECISION | Hours |
+| charge_energy_added | DOUBLE PRECISION | kWh this session |
+| created_at | TIMESTAMPTZ | |
+
+**Index:** `(vehicle_id, snapshot_at DESC)` — covers time-range queries and latest-snapshot lookups.
+
+#### `charging_logs`
+
+| Column | Type | Notes |
+|---|---|---|
+| id | BIGSERIAL PK | |
+| vehicle_id | BIGINT FK | → tesla_vehicles.id |
+| started_at | TIMESTAMPTZ | Session start (indexed) |
+| ended_at | TIMESTAMPTZ NULL | NULL = session in progress |
+| start_battery_level | INT | % at session start |
+| end_battery_level | INT | % at session end (0 if in progress) |
+| energy_added | DOUBLE PRECISION | kWh delivered |
+| charge_limit | INT | Driver's target % |
+| max_charge_rate | DOUBLE PRECISION | Peak miles/hour |
+| created_at / updated_at | TIMESTAMPTZ | |
+
+**Index:** `(vehicle_id, started_at DESC)` — covers date-range queries.
+
+---
+
+### 5. Charging Session Inference — State Machine
+
+Tesla's `charging_state` field drives session detection:
+
+```
+Previous snapshot     New snapshot        Action
+──────────────────    ──────────────────  ──────────────────────────────────
+Disconnected/Stopped  Charging            INSERT new ChargingLog (open session)
+Charging              Charging            UPDATE MaxChargeRate, EnergyAdded
+Charging              Complete            UPDATE EndedAt, EndBatteryLevel (close)
+Charging              Stopped             UPDATE EndedAt, EndBatteryLevel (close)
+Charging              Disconnected        UPDATE EndedAt, EndBatteryLevel (close)
+Complete/Disconnected Complete/Disconnected  No-op
+```
+
+"Previous state" is determined by checking `GetOpenChargingLog()` — if a session
+row exists with `ended_at IS NULL`, the car was charging. If none exists, it was not.
+
+---
+
+### 6. 90-Day Data Retention
+
+`BatteryService.PruneOldData()` deletes:
+- `battery_snapshots` where `snapshot_at < NOW() - 90 days`
+- `charging_logs` where `started_at < NOW() - 90 days`
+
+Both deletions are attempted independently. The endpoint is `POST /tesla/admin/prune`.
+In a production system this would be triggered by a scheduled cron job.
+
+---
+
+### 7. Testing Strategy
+
+| Layer | Test file | Specs | Approach |
+|---|---|---|---|
+| Service | `battery_service_test.go` | 18 | Hand-rolled mocks for BatteryRepository, TeslaRepository, AuthService, VehicleDataClient |
+| Handler | `battery_handler_test.go` | 15 | Mock BatteryService; httptest.NewRecorder |
+
+Key scenarios covered:
+- Car disconnected → snapshot saved, no charging log created
+- Car starts charging → new ChargingLog opened
+- Car still charging → existing log updated (max rate, energy)
+- Charging completes → log closed with EndedAt and EndBatteryLevel
+- Car asleep (408) → 503 response
+- Invalid vehicleID, missing params → 400 responses
+- PruneOldData success and failure paths
+
+**Total tests after Phase 2: 55 passing (27 handler + 28 service)**
+
+---
+
+### 8. Key Design Decisions
+
+| Decision | Rationale |
+|---|---|
+| Write-through read pattern | Every battery GET also writes a snapshot — no separate ingestion job needed for Phase 2 |
+| Charging inference via DB state | Avoids streaming or background polling; sessions are reconstructed lazily on demand |
+| `ended_at` as nullable pointer | Cleanly distinguishes "session in progress" (NULL) from "session complete" in both Go and JSON |
+| Single BatteryRepository for snapshots + logs | The two models are tightly coupled; splitting them would require cross-repo dependencies |
+| Best-effort session detection | Session inference errors don't invalidate the snapshot. Snapshot correctness is never compromised |
+| `math.Max` for peak charge rate | Simple running maximum tracked across all Charging-state snapshots in a session |
+
+---
+
+### 9. Known Limitations / Future Work
+
+| Limitation | Suggested Fix |
+|---|---|
+| Data only accumulates when callers hit the battery endpoint | Add a background poller (Phase 3) to capture data even when no one is querying |
+| No wake-car support | Add `POST /tesla/vehicles/:id/wake` to wake sleeping vehicles before polling |
+| Prune endpoint is unauthenticated | Add admin authentication middleware |
+| Charging session detection relies on polling frequency | Infrequent polls may miss short sessions entirely |
+| PKCE store still in-memory | Phase 3: replace with Redis or DB-backed session store |

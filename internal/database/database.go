@@ -72,9 +72,12 @@ func Connect(cfg *config.Config) (*gorm.DB, error) {
 	// AutoMigrate creates or updates tables for each model struct.
 	// Order matters when there are foreign keys:
 	//   TeslaUser must exist before TeslaVehicle (which references it).
+	//   TeslaVehicle must exist before BatterySnapshot and ChargingLog (which reference it).
 	if err := db.AutoMigrate(
-		&model.TeslaUser{},    // creates/updates the tesla_users table
-		&model.TeslaVehicle{}, // creates/updates the tesla_vehicles table (FK → tesla_users)
+		&model.TeslaUser{},       // creates/updates the tesla_users table
+		&model.TeslaVehicle{},    // creates/updates the tesla_vehicles table (FK → tesla_users)
+		&model.BatterySnapshot{}, // creates/updates the battery_snapshots table (FK → tesla_vehicles)
+		&model.ChargingLog{},     // creates/updates the charging_logs table (FK → tesla_vehicles)
 	); err != nil {
 		return nil, fmt.Errorf("failed to run database migrations: %w", err)
 	}

@@ -244,3 +244,110 @@ func (c *Client) GetVehicles(accessToken string) ([]Vehicle, error) {
 
 	return listResp.Response, nil
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Vehicle Data (battery + charging state)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// VehicleDataResponse is the top-level wrapper Tesla sends back from
+// GET /api/1/vehicles/{id}/vehicle_data
+// The interesting bits live in the nested Response.ChargeState sub-object.
+type VehicleDataResponse struct {
+	Response VehicleData `json:"response"`
+}
+
+// VehicleData is the full vehicle state object. Tesla returns many sub-objects
+// here (drive_state, climate_state, vehicle_state, etc.). We only decode the
+// fields TeslaGo needs to avoid unnecessary coupling to the full Tesla schema.
+type VehicleData struct {
+	// ID is the Owner API vehicle identifier (same as Vehicle.ID).
+	ID int64 `json:"id"`
+
+	// ChargeState contains all battery and charging-related telemetry.
+	// This is the only sub-object TeslaGo cares about for Phase 2.
+	ChargeState ChargeState `json:"charge_state"`
+}
+
+// ChargeState mirrors the `charge_state` object inside Tesla's vehicle_data
+// response. All numeric fields are zero-valued when the car is not charging.
+//
+// Field-by-field explanation:
+//
+//	BatteryLevel          — state of charge as a percentage, 0–100
+//	BatteryRange          — estimated remaining range (miles)
+//	ChargingState         — "Charging" | "Complete" | "Disconnected" | "Stopped"
+//	ChargeRate            — current charging speed (miles of range added per hour)
+//	ChargerVoltage        — actual voltage from the charger (Volts)
+//	ChargerActualCurrent  — actual current from the charger (Amps)
+//	ChargeLimitSOC        — driver-configured target charge percentage (0–100)
+//	TimeToFullCharge      — estimated hours until charge limit is reached
+//	ChargeEnergyAdded     — kWh added in the current/most-recent session
+type ChargeState struct {
+	BatteryLevel         int     `json:"battery_level"`
+	BatteryRange         float64 `json:"battery_range"`
+	ChargingState        string  `json:"charging_state"`
+	ChargeRate           float64 `json:"charge_rate"`
+	ChargerVoltage       int     `json:"charger_voltage"`
+	ChargerActualCurrent int     `json:"charger_actual_current"`
+	ChargeLimitSOC       int     `json:"charge_limit_soc"`
+	TimeToFullCharge     float64 `json:"time_to_full_charge"`
+	ChargeEnergyAdded    float64 `json:"charge_energy_added"`
+}
+
+// GetVehicleData fetches the current state of a single vehicle from the Tesla
+// Owner API. This is the primary data source for Phase 2 battery and charging
+// functionality.
+//
+// Tesla API endpoint:
+//
+//	GET /api/1/vehicles/{vehicleID}/vehicle_data
+//
+// Important: if the car is asleep, Tesla returns HTTP 408 (Request Timeout).
+// The service layer is responsible for interpreting that and surfacing a
+// helpful message to the caller. We intentionally do NOT try to wake the car
+// here — waking costs $0.02 per call and should be an explicit decision.
+//
+// Parameters:
+//   - accessToken: a valid (non-expired) Bearer token from GetValidAccessToken()
+//   - vehicleID:   Tesla's Owner API vehicle ID (stored as TeslaVehicle.VehicleID)
+func (c *Client) GetVehicleData(accessToken string, vehicleID int64) (*VehicleData, error) {
+	// Construct the URL: /api/1/vehicles/{vehicleID}/vehicle_data
+	url := fmt.Sprintf("%s/api/1/vehicles/%d/vehicle_data", c.apiBaseURL, vehicleID)
+
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("building vehicle data request: %w", err)
+	}
+	// Attach the Bearer token — every Owner API request requires this header.
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("User-Agent", userAgent)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("executing vehicle data request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	rawBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading vehicle data response body: %w", err)
+	}
+
+	// HTTP 408 means the vehicle is asleep and cannot be reached.
+	// We return a distinct sentinel error so the service can map it to a
+	// user-friendly 503 response rather than a generic 500.
+	if resp.StatusCode == http.StatusRequestTimeout {
+		return nil, fmt.Errorf("vehicle is asleep or unreachable (408): %s", string(rawBody))
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("tesla api returned status %d: %s", resp.StatusCode, string(rawBody))
+	}
+
+	var dataResp VehicleDataResponse
+	if err := json.Unmarshal(rawBody, &dataResp); err != nil {
+		return nil, fmt.Errorf("decoding vehicle data response: %w", err)
+	}
+
+	return &dataResp.Response, nil
+}

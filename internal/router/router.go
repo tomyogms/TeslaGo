@@ -101,5 +101,52 @@ func SetupRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 		tesla.GET("/vehicles", teslaAuthHandler.GetVehicles)
 	}
 
+	// ── Phase 2: Battery & Charging ──────────────────────────────────────────
+	// Wire: BatteryRepository + TeslaRepository → BatteryService → BatteryHandler
+	//
+	// BatteryService depends on BOTH repositories and on TeslaAuthService (for
+	// token management). We reuse the already-constructed teslaRepo and
+	// teslaAuthService from the block above — no duplication.
+
+	batteryRepo := repository.NewBatteryRepository(db)
+
+	// NewBatteryService wires all four dependencies:
+	//   batteryRepo   — read/write snapshots and charging logs
+	//   teslaRepo     — look up vehicles (to get Tesla's external vehicle_id)
+	//   teslaAuthService — get a valid Bearer token before every API call
+	//   teslaAPIClient   — the same HTTP client used by Phase 1
+	batteryService := service.NewBatteryService(
+		batteryRepo,
+		teslaRepo,
+		teslaAuthService,
+		teslaAPIClient,
+	)
+
+	batteryHandler := handler.NewBatteryHandler(batteryService)
+
+	// Vehicle-scoped battery routes. :vehicleID is our internal tesla_vehicles.id.
+	vehicles := r.Group("/tesla/vehicles/:vehicleID")
+	{
+		// GET /tesla/vehicles/:vehicleID/battery?admin_id=<id>
+		// Live battery reading — calls Tesla API, saves snapshot, returns result.
+		vehicles.GET("/battery", batteryHandler.GetCurrentBattery)
+
+		// GET /tesla/vehicles/:vehicleID/battery-history?start_date=&end_date=
+		// Time-series battery snapshots from our database.
+		vehicles.GET("/battery-history", batteryHandler.GetBatteryHistory)
+
+		// GET /tesla/vehicles/:vehicleID/charging-logs?start_date=&end_date=&limit=
+		// Inferred charging sessions from our database.
+		vehicles.GET("/charging-logs", batteryHandler.GetChargingLogs)
+	}
+
+	// Admin maintenance routes.
+	admin := r.Group("/tesla/admin")
+	{
+		// POST /tesla/admin/prune
+		// Deletes battery snapshots and charging logs older than 90 days.
+		admin.POST("/prune", batteryHandler.PruneOldData)
+	}
+
 	return r
 }
