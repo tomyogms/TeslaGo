@@ -81,10 +81,10 @@ var _ = Describe("TeslaAuthHandler", func() {
 
 				Expect(rec.Code).To(Equal(http.StatusOK))
 
-				var body map[string]string
+				var body handler.GetAuthURLResponse
 				Expect(json.Unmarshal(rec.Body.Bytes(), &body)).To(Succeed())
-				Expect(body["auth_url"]).To(ContainSubstring("auth.tesla.com"))
-				Expect(body["state"]).NotTo(BeEmpty())
+				Expect(body.AuthURL).To(ContainSubstring("auth.tesla.com"))
+				Expect(body.State).NotTo(BeEmpty())
 			})
 		})
 
@@ -134,9 +134,9 @@ var _ = Describe("TeslaAuthHandler", func() {
 				router.ServeHTTP(urlRec, urlReq)
 				Expect(urlRec.Code).To(Equal(http.StatusOK))
 
-				var urlBody map[string]string
+				var urlBody handler.GetAuthURLResponse
 				Expect(json.Unmarshal(urlRec.Body.Bytes(), &urlBody)).To(Succeed())
-				state := urlBody["state"]
+				state := urlBody.State
 
 				// Step 2: simulate Tesla callback with the state we got
 				callbackReq, _ := http.NewRequest(http.MethodGet, "/tesla/auth/callback?code=auth-code&state="+state, nil)
@@ -157,9 +157,9 @@ var _ = Describe("TeslaAuthHandler", func() {
 				urlRec := httptest.NewRecorder()
 				router.ServeHTTP(urlRec, urlReq)
 
-				var urlBody map[string]string
+				var urlBody handler.GetAuthURLResponse
 				Expect(json.Unmarshal(urlRec.Body.Bytes(), &urlBody)).To(Succeed())
-				state := urlBody["state"]
+				state := urlBody.State
 
 				// Step 2: callback triggers service error
 				callbackReq, _ := http.NewRequest(http.MethodGet, "/tesla/auth/callback?code=auth-code&state="+state, nil)
@@ -185,9 +185,9 @@ var _ = Describe("TeslaAuthHandler", func() {
 
 				Expect(rec.Code).To(Equal(http.StatusOK))
 
-				var body map[string]interface{}
+				var body handler.GetVehiclesResponse
 				Expect(json.Unmarshal(rec.Body.Bytes(), &body)).To(Succeed())
-				Expect(body["count"]).To(BeEquivalentTo(1))
+				Expect(body.Count).To(Equal(1))
 			})
 		})
 

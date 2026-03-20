@@ -4326,6 +4326,341 @@ func main() {
 
 ---
 
+## Response Serialization & Testing Overhead Analysis
+
+This section addresses a practical follow-up question that comes after implementing Request DTOs: **Should we create Response DTOs, and how much testing overhead do they add?**
+
+The answer is **yes, create Response DTOs** — but with minimal testing overhead. This section provides concrete analysis and examples.
+
+---
+
+### Q1: Why create Response DTOs at all?
+
+**Current approach (without Response DTOs):**
+```go
+// Using gin.H (map[string]interface{})
+c.JSON(http.StatusOK, gin.H{
+    "snapshots": snaps,
+    "count":     len(snaps),
+})
+```
+
+**With Response DTOs:**
+```go
+// Using typed struct
+type GetBatteryHistoryResponse struct {
+    Snapshots []model.BatterySnapshot `json:"snapshots"`
+    Count     int                     `json:"count"`
+}
+
+c.JSON(http.StatusOK, GetBatteryHistoryResponse{
+    Snapshots: snaps,
+    Count:     len(snaps),
+})
+```
+
+**Benefits of Response DTOs:**
+
+| Aspect | Without DTO (gin.H) | With DTO |
+|--------|-------------------|----------|
+| **Type checking** | ❌ No (map keys are strings) | ✅ Yes (compiler validates fields) |
+| **Field names** | ❌ Typos invisible until runtime | ✅ Typos caught at compile time |
+| **IDE support** | ❌ No autocomplete | ✅ Full autocomplete & "find usages" |
+| **Documentation** | ❌ Implicit in code | ✅ Explicit in struct definition |
+| **Consistency** | ❌ Field names can drift | ✅ Enforced across all endpoints |
+| **Refactoring** | ❌ Manual, error-prone | ✅ Automated by compiler |
+
+**Example: The Silent Bug**
+
+```go
+// Without DTOs - typo goes unnoticed in tests:
+c.JSON(http.StatusOK, gin.H{
+    "snapshot": snap,   // ← Correct
+})
+
+// Test:
+var body map[string]interface{}
+json.Unmarshal(rec.Body.Bytes(), &body)
+Expect(body["snapshots"]).NotTo(BeNil())  // ← TYPO! Tests pass anyway
+// Client gets {"snapshot": ...} but expects {"snapshots": ...}
+```
+
+```go
+// With DTOs - typo caught at compile time:
+type Response struct {
+    Snapshot *model.BatterySnapshot `json:"snapshot"`
+}
+
+c.JSON(http.StatusOK, Response{Snapshot: snap})
+
+// Test:
+var body Response
+json.Unmarshal(rec.Body.Bytes(), &body)
+Expect(body.Snapshots).NotTo(BeNil())  // ← COMPILER ERROR: field doesn't exist
+```
+
+**Conclusion:** Response DTOs are **not over-engineering**. They're the standard practice in mature Go codebases and provide real bug prevention.
+
+---
+
+### Q2: How much testing overhead do Response DTOs add?
+
+**Short answer: Almost none.** Here's the actual breakdown:
+
+#### Testing Overhead Comparison
+
+**Scenario: Testing a response with 3 fields**
+
+**Without Response DTO (current approach):**
+```go
+It("returns battery history", func() {
+    req, _ := http.NewRequest(http.MethodGet, "/tesla/vehicles/5/battery-history?start_date=...&end_date=...", nil)
+    router.ServeHTTP(rec, req)
+
+    Expect(rec.Code).To(Equal(http.StatusOK))
+    
+    var body map[string]interface{}
+    Expect(json.Unmarshal(rec.Body.Bytes(), &body)).To(Succeed())
+    Expect(body["count"]).To(BeEquivalentTo(2))
+    // Note: "snapshots" field not tested because it's not extracted
+})
+```
+
+**With Response DTO:**
+```go
+It("returns battery history", func() {
+    req, _ := http.NewRequest(http.MethodGet, "/tesla/vehicles/5/battery-history?start_date=...&end_date=...", nil)
+    router.ServeHTTP(rec, req)
+
+    Expect(rec.Code).To(Equal(http.StatusOK))
+    
+    var body GetBatteryHistoryResponse  // ← Changed type
+    Expect(json.Unmarshal(rec.Body.Bytes(), &body)).To(Succeed())
+    Expect(body.Count).To(Equal(2))      // ← Changed field access
+    Expect(body.Snapshots).To(HaveLen(2)) // ← Now can verify deeply
+})
+```
+
+**Extra lines of test code:** 1 line (just the deeper assertions you now **can** write)
+
+**Actual effort:** Change `map[string]interface{}` to `GetBatteryHistoryResponse` (find & replace in 60 lines)
+
+#### Do we need separate tests for DTOs?
+
+**No.** Here's why:
+
+1. **JSON marshalling is validated implicitly:** When you unmarshal into a typed struct, Go's JSON decoder validates the schema. If field names don't match or types are wrong, unmarshal fails.
+
+2. **Your existing handler tests ARE the DTO tests:** Each handler test that unmarshals into a Response DTO validates:
+   - ✅ JSON structure is correct
+   - ✅ Field names are spelled correctly
+   - ✅ Field types are compatible
+   - ✅ Response is properly formatted
+
+3. **Compiler catches mistakes:** Any DTO field access typo (`body.Snapshots` vs `body.snapshots`) is a compile error, not a test failure.
+
+#### Mocking Overhead for DTOs?
+
+**Zero.** Service mocks are unchanged:
+
+```go
+// Before: mock returns data
+type mockBatteryService struct {
+    historySnaps []model.BatterySnapshot
+}
+
+func (m *mockBatteryService) GetBatteryHistory(...) ([]model.BatterySnapshot, error) {
+    return m.historySnaps, nil
+}
+
+// After: mock is IDENTICAL
+// Handler creates the DTO from the service response
+// DTO is NOT mocked
+```
+
+---
+
+### Q3: Should we write separate validation tests for Response DTOs?
+
+**Short answer: No, they're implicitly tested.**
+
+**Why separate tests are unnecessary:**
+
+1. **Your handler tests already validate DTOs**
+   ```go
+   // This test validates that GetBatteryHistoryResponse works:
+   It("returns battery history", func() {
+       var body GetBatteryHistoryResponse
+       Expect(json.Unmarshal(rec.Body.Bytes(), &body)).To(Succeed())
+       // ^ If DTO struct is wrong, this fails
+   })
+   ```
+
+2. **JSON struct tags are validated at compile time** (partially)
+   - If you add a field but forget to tag it: doesn't appear in JSON
+   - If you misspell a tag: unmarshal creates zero value
+   - Tests that check fields will fail if something's wrong
+
+3. **The compiler catches field name typos**
+   - `body.Snapshots` (DTO approach) → compiler error if field doesn't exist
+   - `body["snapshots"]` (map approach) → silent bug, no error
+
+**Cost-benefit analysis:**
+
+| Approach | Test Count | Catch Bugs | Maintainability |
+|----------|-----------|-----------|-----------------|
+| No Response DTOs | 60 | Medium (runtime only) | Low (implicit schema) |
+| With Response DTOs + no extra tests | 60 | High (compile-time) | High (explicit schema) |
+| With Response DTOs + separate DTO tests | 60+ | Same (implicitly tested anyway) | Overkill |
+
+**Conclusion:** Write Response DTOs, update existing tests (1-line changes), and **do NOT write separate DTO tests**. You get better type safety with zero testing overhead.
+
+---
+
+### Q4: How do we implement Response DTOs? (Step-by-step)
+
+**Step 1: Create response_dto.go**
+
+```go
+// internal/handler/response_dto.go
+package handler
+
+type GetAuthURLResponse struct {
+    AuthURL string `json:"auth_url"`
+    State   string `json:"state"`
+}
+
+type GetBatteryHistoryResponse struct {
+    Snapshots []model.BatterySnapshot `json:"snapshots"`
+    Count     int                     `json:"count"`
+}
+
+// ... one struct per endpoint response
+```
+
+**Step 2: Update handlers to use DTOs**
+
+```go
+// Before:
+c.JSON(http.StatusOK, gin.H{
+    "auth_url": authURL,
+    "state":    compositeState,
+})
+
+// After:
+c.JSON(http.StatusOK, GetAuthURLResponse{
+    AuthURL: authURL,
+    State:   compositeState,
+})
+```
+
+**Step 3: Update tests (trivial)**
+
+```go
+// Before:
+var body map[string]string
+Expect(json.Unmarshal(rec.Body.Bytes(), &body)).To(Succeed())
+Expect(body["auth_url"]).To(ContainSubstring("..."))
+
+// After:
+var body handler.GetAuthURLResponse
+Expect(json.Unmarshal(rec.Body.Bytes(), &body)).To(Succeed())
+Expect(body.AuthURL).To(ContainSubstring("..."))
+```
+
+**Effort estimate:**
+- Create response_dto.go: 15 minutes (one struct per endpoint)
+- Update 7 handlers: 10 minutes (find & replace)
+- Update 60 tests: 10 minutes (mostly find & replace)
+- **Total: ~35 minutes for complete type-safe API**
+
+---
+
+### Q5: Real-world example from TeslaGo
+
+**Response DTO for battery endpoint:**
+
+```go
+type GetBatteryHistoryResponse struct {
+    Snapshots []model.BatterySnapshot `json:"snapshots"`
+    Count     int                     `json:"count"`
+}
+```
+
+**Handler implementation:**
+```go
+snaps, err := h.service.GetBatteryHistory(c.Request.Context(), req.VehicleID, req.StartDate, req.EndDate)
+if err != nil {
+    c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve battery history"})
+    return
+}
+
+c.JSON(http.StatusOK, GetBatteryHistoryResponse{
+    Snapshots: snaps,
+    Count:     len(snaps),
+})
+```
+
+**Test (with strong typing):**
+```go
+It("returns battery history", func() {
+    startStr, endStr := validDateRange()
+    req, _ := http.NewRequest(http.MethodGet, "/tesla/vehicles/5/battery-history?start_date="+startStr+"&end_date="+endStr, nil)
+    router.ServeHTTP(rec, req)
+
+    Expect(rec.Code).To(Equal(http.StatusOK))
+    
+    var body handler.GetBatteryHistoryResponse
+    Expect(json.Unmarshal(rec.Body.Bytes(), &body)).To(Succeed())
+    Expect(body.Count).To(Equal(2))           // ← Type-safe
+    Expect(body.Snapshots).To(HaveLen(2))     // ← IDE autocomplete works
+    Expect(body.Snapshots[0].BatteryLevel).To(Equal(80))  // ← Deep inspection
+})
+```
+
+**Benefit:** Typo in field name → compile error, not runtime bug.
+
+---
+
+### Q6: Why is this approach better than alternatives?
+
+**Alternative 1: Keep using gin.H (maps)**
+- ❌ No type safety
+- ❌ Field names are implicit
+- ❌ No IDE support
+- ❌ Typos invisible until runtime
+
+**Alternative 2: Use OpenAPI/Swagger generation**
+- ✅ Auto-generates DTOs
+- ❌ Overkill for a small API (adds complexity)
+- ❌ Requires maintaining spec separately
+- ❌ For TeslaGo: not worth it yet
+
+**Alternative 3: Explicit Response DTOs (our approach)**
+- ✅ Type safety from compiler
+- ✅ Single source of truth
+- ✅ IDE support (autocomplete)
+- ✅ Zero testing overhead
+- ✅ Minimal boilerplate (~150 lines for 8 endpoints)
+- ✅ Easy to understand and maintain
+
+**Conclusion:** Response DTOs are the sweet spot for a small-to-medium Go service like TeslaGo.
+
+---
+
+### Summary: Response DTOs & Testing Overhead
+
+| Question | Answer |
+|----------|--------|
+| Should we use Response DTOs? | **Yes.** Type safety, single source of truth, no testing overhead. |
+| Do we need separate DTO tests? | **No.** Existing handler tests validate them implicitly. |
+| How much testing code changes? | **Minimal.** Change `map[string]interface{}` to `ResponseType` (~1-3 lines per test). |
+| Does mocking get harder? | **No.** Service mocks unchanged; DTOs just wrap the service response. |
+| What's the total implementation cost? | **~35 minutes** for a full API with 7-8 endpoints + tests. |
+| What do we gain? | **Compile-time type safety, IDE support, consistency, maintainability.** |
+
+**Recommendation:** Implement Response DTOs for all handlers. The cost is negligible, the benefits are real, and it aligns with Clean Architecture principles of explicit contracts at boundaries.
+
 ## Future Categories
 
 Add new sections as you explore:

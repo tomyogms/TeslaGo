@@ -143,7 +143,7 @@ func (h *BatteryHandler) GetCurrentBattery(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"snapshot": snap})
+	c.JSON(http.StatusOK, GetCurrentBatteryResponse{Snapshot: snap})
 }
 
 // GetBatteryHistory handles GET /tesla/vehicles/:vehicleID/battery-history
@@ -203,9 +203,9 @@ func (h *BatteryHandler) GetBatteryHistory(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"snapshots": snaps,
-		"count":     len(snaps),
+	c.JSON(http.StatusOK, GetBatteryHistoryResponse{
+		Snapshots: snaps,
+		Count:     len(snaps),
 	})
 }
 
@@ -272,9 +272,9 @@ func (h *BatteryHandler) GetChargingLogs(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"charging_logs": logs,
-		"count":         len(logs),
+	c.JSON(http.StatusOK, GetChargingLogsResponse{
+		ChargingLogs: logs,
+		Count:        len(logs),
 	})
 }
 
@@ -306,7 +306,7 @@ func (h *BatteryHandler) PruneOldData(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to prune old data"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"message": "old data pruned successfully"})
+	c.JSON(http.StatusOK, PruneOldDataResponse{Message: "old data pruned successfully"})
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -123,9 +123,9 @@ var _ = Describe("BatteryHandler", func() {
 				router.ServeHTTP(rec, req)
 				Expect(rec.Code).To(Equal(http.StatusOK))
 
-				var body map[string]interface{}
+				var body handler.GetCurrentBatteryResponse
 				Expect(json.Unmarshal(rec.Body.Bytes(), &body)).To(Succeed())
-				Expect(body["snapshot"]).NotTo(BeNil())
+				Expect(body.Snapshot).NotTo(BeNil())
 			})
 		})
 
@@ -201,9 +201,10 @@ var _ = Describe("BatteryHandler", func() {
 				router.ServeHTTP(rec, req)
 
 				Expect(rec.Code).To(Equal(http.StatusOK))
-				var body map[string]interface{}
+				var body handler.GetBatteryHistoryResponse
 				Expect(json.Unmarshal(rec.Body.Bytes(), &body)).To(Succeed())
-				Expect(body["count"]).To(BeEquivalentTo(2))
+				Expect(body.Count).To(Equal(2))
+				Expect(body.Snapshots).To(HaveLen(2))
 			})
 		})
 
@@ -238,9 +239,10 @@ var _ = Describe("BatteryHandler", func() {
 				router.ServeHTTP(rec, req)
 
 				Expect(rec.Code).To(Equal(http.StatusOK))
-				var body map[string]interface{}
+				var body handler.GetChargingLogsResponse
 				Expect(json.Unmarshal(rec.Body.Bytes(), &body)).To(Succeed())
-				Expect(body["count"]).To(BeEquivalentTo(1))
+				Expect(body.Count).To(Equal(1))
+				Expect(body.ChargingLogs).To(HaveLen(1))
 			})
 		})
 
@@ -263,9 +265,9 @@ var _ = Describe("BatteryHandler", func() {
 				router.ServeHTTP(rec, req)
 				Expect(rec.Code).To(Equal(http.StatusOK))
 
-				var body map[string]string
+				var body handler.PruneOldDataResponse
 				Expect(json.Unmarshal(rec.Body.Bytes(), &body)).To(Succeed())
-				Expect(body["message"]).To(ContainSubstring("pruned"))
+				Expect(body.Message).To(ContainSubstring("pruned"))
 			})
 		})
 

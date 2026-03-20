@@ -169,9 +169,9 @@ func (h *TeslaAuthHandler) GetAuthURL(c *gin.Context) {
 
 	// Return both the URL (for redirecting the admin) and the state (so the
 	// frontend can verify it when the callback returns).
-	c.JSON(http.StatusOK, gin.H{
-		"auth_url": authURL,
-		"state":    compositeState,
+	c.JSON(http.StatusOK, GetAuthURLResponse{
+		AuthURL: authURL,
+		State:   compositeState,
 	})
 }
 
@@ -246,10 +246,10 @@ func (h *TeslaAuthHandler) Callback(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"message":          "Tesla account linked successfully",
-		"admin_id":         teslaUser.AdminID,
-		"token_expires_at": teslaUser.TokenExpiresAt,
+	c.JSON(http.StatusOK, CallbackResponse{
+		Message:        "Tesla account linked successfully",
+		AdminID:        teslaUser.AdminID,
+		TokenExpiresAt: teslaUser.TokenExpiresAt,
 	})
 }
 
@@ -287,9 +287,9 @@ func (h *TeslaAuthHandler) GetVehicles(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"vehicles": vehicles,
-		"count":    len(vehicles),
+	c.JSON(http.StatusOK, GetVehiclesResponse{
+		Vehicles: vehicles,
+		Count:    len(vehicles),
 	})
 }
 
