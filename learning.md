@@ -17,6 +17,8 @@ A quick reference organized by topic. As you explore TeslaGo, questions and lear
 - [HTTP Server & Deployment - Architecture & Scaling](#http-server--deployment---architecture--scaling)
 - [AWS Container Orchestration - ECS vs EKS](#aws-container-orchestration---ecs-vs-eks)
 - [Multi-Region Architecture & Cost Analysis](#multi-region-architecture--cost-analysis)
+- [Router & Dependency Injection](#router--dependency-injection)
+- [Gin Web Framework](#gin-web-framework)
 
 ---
 
@@ -2400,6 +2402,1043 @@ Cost per user DECREASES as you scale, but absolute cost increases. The database 
 
 ---
 
+## Router & Dependency Injection
+
+### Q: What is the router and why does it exist?
+
+**Short Answer:**
+The router is the "composition root" — the one place where all dependencies are created and wired together. It's not a layer in Clean Architecture; it's the bootstrap infrastructure that enables the layers to exist.
+
+**High-Level Role:**
+
+Think of the router as the **app's blueprint**:
+- It creates repositories, services, and handlers
+- It injects dependencies from one layer to the next
+- It registers HTTP routes that map URLs to handlers
+- It returns a fully-configured engine to `main.go`
+
+**What it does:**
+
+```go
+// SetupRouter (in internal/router/router.go)
+func SetupRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
+    // Step 1: Create repository (data access layer)
+    teslaRepo := repository.NewTeslaRepository(db)
+    
+    // Step 2: Create service (business logic), inject repo
+    teslaService := service.NewTeslaAuthService(teslaRepo, ...)
+    
+    // Step 3: Create handler (HTTP layer), inject service
+    teslaHandler := handler.NewTeslaAuthHandler(teslaService)
+    
+    // Step 4: Register route
+    r.GET("/tesla/auth/url", teslaAuthHandler.GetAuthURL)
+    
+    return r  // Done!
+}
+```
+
+**Why it matters:**
+
+Without centralized wiring, you'd have this problem:
+
+```go
+// ❌ WITHOUT a router (scattered wiring)
+// main.go
+repo := repository.NewTeslaRepository(db)
+service := service.NewTeslaAuthService(repo, ...)
+handler := handler.NewTeslaAuthHandler(service)
+
+// another_file.go (duplicate code!)
+repo := repository.NewTeslaRepository(db)  // ❌ Duplicate
+service := service.NewTeslaAuthService(repo, ...)
+handler := handler.NewTeslaAuthHandler(service)
+```
+
+**With a router, all wiring happens ONCE.**
+
+**Key File Reference:**
+- `internal/router/router.go` (lines 1-152): Complete setup
+
+---
+
+### Q: Is the router a layer in Clean Architecture?
+
+**Short Answer:**
+No. The router is **not** a layer. It's infrastructure (bootstrap code) that sits *outside* the layered architecture.
+
+**Why it's NOT a Layer:**
+
+A layer in Clean Architecture has two characteristics:
+1. **Processes data** — transforms data from one form to another
+2. **Has business logic** — makes decisions, enforces rules
+
+**The router has neither:**
+
+```go
+// ✅ Real layer (Service)
+func (s *TeslaAuthService) BuildAuthURL(state, codeChallenge string) string {
+    // Transforms input → output (data processing)
+    // Makes decisions (what OAuth parameters?)
+    return fmt.Sprintf("https://auth.tesla.com/...?state=%s", state)
+}
+
+// ❌ Router is NOT a layer
+func SetupRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
+    // No data transformation
+    // No business logic (no if/else, no decisions)
+    // Just creates instances and wires them
+    teslaRepo := repository.NewTeslaRepository(db)
+    teslaService := service.NewTeslaAuthService(teslaRepo, ...)
+    return r
+}
+```
+
+**What the router actually is:**
+
+```
+┌──────────────────────────────────────────────┐
+│  Infrastructure Layer (Setup/Bootstrap)      │
+│  ├─ main.go (entry point)                    │
+│  ├─ config/config.go (load env vars)         │
+│  ├─ database/database.go (connect to DB)     │
+│  └─ router/router.go (wire components)       │ ← Router is here!
+└──────────────────────────────────────────────┘
+        (Not part of data flow)
+                  ↓
+┌──────────────────────────────────────────────┐
+│       Actual Architecture Layers              │
+├──────────────────────────────────────────────┤
+│  Handler (HTTP parsing)                      │
+├──────────────────────────────────────────────┤
+│  Service (Business Logic)                    │
+├──────────────────────────────────────────────┤
+│  Repository (Data Access)                    │
+├──────────────────────────────────────────────┤
+│  Model (Pure Data)                           │
+├──────────────────────────────────────────────┤
+│  PostgreSQL (External)                       │
+└──────────────────────────────────────────────┘
+     (Actual data processing flow)
+```
+
+---
+
+### Q: How does Dependency Injection work in TeslaGo?
+
+**Short Answer:**
+Each layer receives its dependencies as constructor parameters. Components know only interfaces, not concrete implementations. This makes testing and swapping implementations trivial.
+
+**The DI Pattern in TeslaGo:**
+
+```go
+// Step 1: Repository receives the database connection
+repo := repository.NewTeslaRepository(db)
+                                      ↑
+                        INJECTED from main.go
+
+// Step 2: Service receives the repository interface
+service := service.NewTeslaAuthService(repo, ...)
+                                       ↑
+                    INJECTED from Step 1
+
+// Step 3: Handler receives the service interface
+handler := handler.NewTeslaAuthHandler(service)
+                                       ↑
+                    INJECTED from Step 2
+```
+
+**Why This is Powerful:**
+
+**1. Testability — Use Mocks**
+
+```go
+// In production:
+realService := service.NewTeslaAuthService(realRepo, teslaClient)
+handler := handler.NewTeslaAuthHandler(realService)
+
+// In tests:
+mockService := &mockTeslaAuthService{}  // Fake implementation
+handler := handler.NewTeslaAuthHandler(mockService)  // Same handler!
+// The handler doesn't know it's a mock — it only sees the interface
+```
+
+**2. Loose Coupling — Depend on Interfaces**
+
+In the handler, we only import the interface, not the concrete type:
+
+```go
+// handler/tesla_auth_handler.go
+import "github.com/tomyogms/TeslaGo/internal/service"
+
+type TeslaAuthHandler struct {
+    service service.TeslaAuthService  // ← Interface, not concrete!
+}
+```
+
+The service package exports only the interface:
+
+```go
+// service/tesla_auth_service.go
+// Interface (public, what handlers depend on)
+type TeslaAuthService interface {
+    BuildAuthURL(state, codeChallenge string) string
+    HandleCallback(ctx context.Context, adminID, code, codeVerifier string) error
+}
+
+// Concrete struct (private, internal only)
+type teslaAuthService struct {  // ← lowercase = private
+    repo  repository.TeslaRepository
+    client *http.Client
+}
+
+// Constructor returns the interface, not the concrete type
+func NewTeslaAuthService(...) TeslaAuthService {  // ← Returns interface
+    return &teslaAuthService{...}
+}
+```
+
+**3. Flexibility — Swap Implementations**
+
+If you wanted to use a different database provider:
+
+```go
+// Change ONE line in the router:
+// Instead of:
+repo := repository.NewTeslaRepository(db)
+
+// Use:
+repo := repository.NewMongoRepository(mongoClient)
+
+// Everything else continues to work!
+// Services and handlers don't care which repository it is
+```
+
+**4. No DI Framework Needed**
+
+TeslaGo uses **explicit, manual wiring**:
+
+```go
+// ✅ Explicit (what TeslaGo does)
+repo := repository.NewTeslaRepository(db)
+service := service.NewTeslaAuthService(repo, ...)
+handler := handler.NewTeslaAuthHandler(service)
+
+// ❌ Framework-based (alternative, not used)
+@Inject
+class TeslaAuthHandler {
+    @Autowired
+    private TeslaAuthService service;  // Framework injects this
+}
+```
+
+**Why explicit is better for TeslaGo:**
+- Readable — you can see the entire dependency graph
+- Debuggable — stack traces are cleaner
+- Minimal dependencies — no DI framework to learn
+- Flexible — use any patterns you want
+
+---
+
+### Q: How does DI enforce Clean Architecture?
+
+**Short Answer:**
+By having each layer depend only on interfaces (not concrete implementations), DI ensures that inner layers never know about outer layer details. The router is the only place that imports concrete types.
+
+**The Dependency Flow:**
+
+```
+VIOLATIONS PREVENTED:
+─────────────────────
+
+❌ Handler CANNOT import GORM directly
+   Handler only imports: service.TeslaAuthService (interface)
+   Handler never sees: &teslaRepository (concrete)
+
+❌ Service CANNOT import Gin
+   Service only imports: repository.TeslaRepository (interface)
+   Service never sees: *gin.Context (HTTP detail)
+
+❌ Repository CANNOT import HTTP
+   Repository only imports: model.TeslaUser (pure data)
+   Repository never sees: *http.Client (HTTP detail)
+
+✅ ONLY the router imports everything
+   Router imports all concrete types because it's bootstrap code
+   Router is outside the layered architecture
+```
+
+**Example: What Clean Architecture Violation Looks Like**
+
+```go
+// ❌ WRONG - Handler knows about GORM
+type TeslaAuthHandler struct {
+    db *gorm.DB  // ← Handler shouldn't know GORM exists!
+}
+
+func (h *TeslaAuthHandler) GetAuthURL(c *gin.Context) {
+    user := &model.TeslaUser{}
+    h.db.Where("admin_id = ?", adminID).First(&user)  // ← Direct DB access
+    // ...
+}
+
+// This violates Clean Architecture because:
+// - Handler layer knows about Repository layer (GORM)
+// - If you change databases, handler breaks too
+// - Can't test handler without a real database
+```
+
+**Example: What Clean Architecture Looks Like (TeslaGo)**
+
+```go
+// ✅ CORRECT - Handler only knows service interface
+type TeslaAuthHandler struct {
+    service service.TeslaAuthService  // ← Only interface, no GORM!
+}
+
+func (h *TeslaAuthHandler) GetAuthURL(c *gin.Context) {
+    adminID := c.Query("admin_id")
+    url := h.service.BuildAuthURL(state, challenge)  // ← Delegate to service
+    c.JSON(http.StatusOK, url)
+}
+
+// Service handles the business logic and DB access:
+type teslaAuthService struct {
+    repo repository.TeslaRepository  // ← Interface, repo impl hidden
+}
+
+func (s *teslaAuthService) BuildAuthURL(state, challenge string) string {
+    // No GORM here either — service doesn't know how data is persisted
+    return fmt.Sprintf("https://auth.tesla.com/...?state=%s", state)
+}
+
+// Repository handles GORM:
+type teslaRepository struct {
+    db *gorm.DB  // ← GORM is OK here (at the data boundary)
+}
+
+func (r *teslaRepository) GetTeslaUser(ctx context.Context, adminID string) (*model.TeslaUser, error) {
+    var user model.TeslaUser
+    r.db.Where("admin_id = ?", adminID).First(&user)  // ← GORM here is expected
+    return &user, nil
+}
+```
+
+**Key Benefits:**
+
+| Benefit | Why DI Enables It |
+|---------|------------------|
+| **Testability** | Tests inject mocks, no real DB needed |
+| **Flexibility** | Swap implementations easily |
+| **Clarity** | Dependencies are explicit and visible |
+| **Reusability** | Service can be used by multiple handlers |
+| **Maintainability** | Changes are localized to one layer |
+
+**Key File References:**
+- Handler imports service interface: `internal/handler/tesla_auth_handler.go` (line 35)
+- Service imports repository interface: `internal/service/tesla_auth_service.go` (line 45)
+- Router wires everything: `internal/router/router.go` (lines 47-102)
+
+---
+
+## Gin Web Framework
+
+### Q: What is Gin and why was it selected for TeslaGo?
+
+**Short Answer:**
+Gin is a lightweight, high-performance HTTP web framework for Go. It provides convenient abstractions for routing, middleware, and request/response handling while staying close to Go's standard library. TeslaGo chose it for performance, simplicity, and alignment with Clean Architecture.
+
+**What Gin Provides:**
+
+```go
+// 1. Routing
+r := gin.Default()
+r.GET("/health", handler.HealthCheck)
+
+// 2. Route Groups
+tesla := r.Group("/tesla")
+{
+    tesla.GET("/auth/url", handler.GetAuthURL)
+    tesla.GET("/vehicles", handler.GetVehicles)
+}
+
+// 3. Request Parsing (query params, path params, body)
+adminID := c.Query("admin_id")        // ← Query parameter
+vehicleID := c.Param("vehicleID")     // ← Path parameter
+c.BindJSON(&body)                     // ← Request body
+
+// 4. Response Formatting
+c.JSON(http.StatusOK, result)         // ← JSON response
+c.HTML(http.StatusOK, "template", data)
+
+// 5. Middleware
+r.Use(Logger())      // Log every request
+r.Use(Recovery())    // Catch panics
+```
+
+**Why Gin for TeslaGo:**
+
+| Reason | Why It Matters |
+|--------|----------------|
+| **Performance** | Gin is one of the fastest Go frameworks; handles 50k+ req/sec |
+| **Simplicity** | Minimal framework overhead; clean API |
+| **Clean Architecture Friendly** | Doesn't impose opinions; works well with layered architecture |
+| **Minimal Dependencies** | ~11 sub-dependencies; small attack surface |
+| **Community Standard** | Most popular Go web framework (78k+ stars) |
+| **Scales Well** | Used by Zcash, Tencent, Gab at scale |
+| **Middleware Pattern** | Easy to add logging, rate limiting, auth |
+| **Low Barrier to Change** | Easy to swap for Echo, Fiber, or net/http if needed |
+
+**Gin in TeslaGo Code:**
+
+```go
+// internal/router/router.go (lines 47-51)
+func SetupRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
+    r := gin.Default()  // ← Create Gin engine with defaults
+    
+    // internal/handler/health_handler.go (lines 19-27)
+    func (h *HealthHandler) HealthCheck(c *gin.Context) {
+        health, err := h.service.CheckHealth(c.Request.Context())
+        if err != nil {
+            c.JSON(http.StatusServiceUnavailable, health)  // ← Gin's JSON helper
+            return
+        }
+        c.JSON(http.StatusOK, health)
+    }
+}
+```
+
+---
+
+### Q: How widely used is Gin in production?
+
+**Short Answer:**
+Gin is the **#1 web framework in Go** by popularity and usage. It has 78,000+ GitHub stars and 50+ million monthly downloads. Used by major companies like Zcash, Gab, Tencent, and thousands of startups.
+
+**Market Comparison:**
+
+| Framework | GitHub Stars | Monthly Downloads | Position | Language |
+|-----------|-------------|------------------|----------|----------|
+| **Gin** | 78,000+ | 50M+ | #1 | Go |
+| **Django** | 77,000+ | 10M+ | #1 | Python |
+| **Express.js** | 65,000+ | 25M+ | #1 | Node.js |
+| **Echo** | 33,000+ | 20M+ | #2 in Go | Go |
+| **Fiber** | 35,000+ | 10M+ | #3 in Go | Go |
+| **Beego** | 31,000+ | 5M+ | #4 in Go | Go |
+
+**Adoption:**
+
+```
+Notable users:
+├─ Zcash (cryptocurrency) — Payment gateway
+├─ Gab (social media) — Entire platform built on Gin
+├─ Tencent (Chinese tech giant) — Internal services
+├─ Alibaba (e-commerce) — Some microservices
+└─ Thousands of startups and enterprises
+```
+
+**Why Gin is Popular:**
+
+1. **Performance** — 40x faster than Ruby on Rails, 15x faster than Python Flask
+2. **Mature** — Maintained since 2014, stable
+3. **No Lock-In** — Easy to migrate to alternatives if needed
+4. **Go Ecosystem** — Works well with GORM, testing frameworks, etc.
+5. **Company-Agnostic** — Not tied to a specific corporation
+
+**For Comparison:**
+
+- Django: Popular but tied to Python's performance limits
+- Express.js: Popular but single-threaded event loop model
+- Gin: Popular AND provides real concurrency advantages
+
+---
+
+### Q: What are the strengths of Gin?
+
+**Short Answer:**
+Gin excels at performance, simplicity, minimal dependencies, middleware patterns, and Clean Architecture compatibility. It's fast, lightweight, and lets you organize code however you want.
+
+**Strength 1: Performance**
+
+```
+Benchmarks:
+├─ JSON serialization: ~500ns per operation (vs Python: 5-10µs)
+├─ Routing lookup: O(1) for most paths
+├─ Can handle 50,000+ requests/sec on single t3.medium instance
+└─ Minimal overhead — overhead is not the bottleneck
+
+For TeslaGo:
+├─ OAuth callbacks are instant
+├─ Battery queries are fast
+└─ Even under load, responses stay quick
+```
+
+**Strength 2: Simple, Intuitive API**
+
+```go
+// Queries
+adminID := c.Query("admin_id")           // ← Very readable
+adminIDDefault := c.DefaultQuery("admin_id", "default")
+
+// Path parameters
+vehicleID := c.Param("vehicleID")
+
+// Request body
+var body struct { Name string }
+c.BindJSON(&body)
+
+// Response
+c.JSON(http.StatusOK, gin.H{"key": "value"})
+
+// vs standard library (more boilerplate):
+adminID := r.URL.Query().Get("admin_id")
+w.Header().Set("Content-Type", "application/json")
+json.NewEncoder(w).Encode(result)
+```
+
+**Strength 3: Minimal Dependencies**
+
+```go
+// Gin's dependency tree:
+├─ bytedance/sonic (JSON serialization, performance-focused)
+├─ go-playground/validator (input validation)
+├─ mattn/go-isatty (terminal detection)
+└─ A few other small, stable packages
+Total: ~11 sub-dependencies
+
+// Impact:
+├─ Fast builds
+├─ Small Docker images (~15 MB with full Go stdlib)
+├─ Small attack surface (fewer things to patch)
+├─ Works in air-gapped environments
+```
+
+**Strength 4: Middleware Pattern**
+
+```go
+// TeslaGo uses built-in middleware
+r := gin.Default()  // ← Automatically includes:
+                    //   ├─ Logger middleware
+                    //   └─ Recovery middleware (panic → 500)
+
+// Easy to add custom middleware
+r.Use(CustomAuthMiddleware())
+r.Use(CustomRateLimitMiddleware())
+
+// Middleware can:
+├─ Log every request
+├─ Catch panics and return 500
+├─ Add headers
+├─ Rate limit
+├─ Authenticate requests
+├─ Modify requests/responses
+└─ Track performance metrics
+```
+
+**Strength 5: Route Grouping (DRY)**
+
+```go
+// TeslaGo does this
+tesla := r.Group("/tesla")
+{
+    tesla.GET("/auth/url", handler.GetAuthURL)
+    tesla.GET("/auth/callback", handler.Callback)
+}
+
+vehicles := r.Group("/tesla/vehicles/:vehicleID")
+{
+    vehicles.GET("/battery", handler.GetCurrentBattery)
+    vehicles.GET("/battery-history", handler.GetBatteryHistory)
+}
+
+// Groups can have their own middleware
+authorized := r.Group("/admin")
+authorized.Use(AuthMiddleware())
+{
+    authorized.POST("/prune", handler.Prune)
+}
+
+// Clean, organized, DRY
+```
+
+**Strength 6: Clean Architecture Alignment**
+
+```
+Gin doesn't impose framework patterns:
+├─ No required base classes
+├─ No annotations or tags (except JSON struct tags)
+├─ No coupling between handlers and framework
+├─ You can organize layers however you want
+
+TeslaGo leverages this:
+├─ Handler → Service → Repository → Model (Clean Architecture)
+├─ No Gin references in Service layer
+├─ No Gin references in Repository layer
+└─ Only HTTP layer knows about Gin
+```
+
+---
+
+### Q: What are the weaknesses of Gin?
+
+**Short Answer:**
+Gin is minimal by design, which is both a strength and weakness. You must add ORM, validation, error handling, and testing utilities yourself. It's not a "batteries included" framework.
+
+**Weakness 1: Not Full-Stack**
+
+```go
+// Gin gives you routing and middleware
+// You add yourself:
+├─ ORM (TeslaGo uses GORM)
+├─ Error handling (TeslaGo implements custom)
+├─ Validation (TeslaGo validates manually)
+├─ Testing utilities (TeslaGo uses Ginkgo)
+├─ Database migrations (TeslaGo uses SQL files)
+└─ Logging (Gin has basic logger)
+
+// vs Django (full-stack):
+Django includes:
+├─ ORM (built-in)
+├─ Admin panel (built-in)
+├─ User authentication (built-in)
+├─ Migrations (auto-generated)
+├─ Form validation (built-in)
+├─ Admin UI (free)
+
+// For TeslaGo:
+// This is actually a STRENGTH
+// (enables Clean Architecture without framework opinions)
+```
+
+**Weakness 2: Minimal Production Defaults**
+
+```go
+// You must configure:
+gin.SetMode(gin.ReleaseMode)  // Disable debug logging
+r.MaxMultipartMemory = 8 << 20  // Upload size limits
+r.NoRoute(...)  // 404 handler
+r.NoMethod(...)  // 405 handler
+
+// vs Django:
+# Django has sensible defaults for production
+# Just set DEBUG=False and ALLOWED_HOSTS
+
+// For TeslaGo:
+// This requires intentionality, not a blocker
+```
+
+**Weakness 3: No Built-in ORM**
+
+```go
+// Gin doesn't include GORM
+// You must integrate it yourself (TeslaGo does)
+
+import "gorm.io/gorm"
+
+func setup(db *gorm.DB) {
+    repo := repository.NewTeslaRepository(db)
+    service := service.NewTeslaAuthService(repo, ...)
+    handler := handler.NewTeslaAuthHandler(service)
+    // Wire everything yourself
+}
+
+// vs Django ORM:
+# Django handles this automatically
+# models.py defines models
+# Django CLI handles everything else
+```
+
+**Weakness 4: Minimal Error Handling**
+
+```go
+// Gin has no built-in error mapping
+// You must implement error handling (TeslaGo mostly does)
+
+func (h *Handler) GetAuthURL(c *gin.Context) {
+    result, err := h.service.DoSomething()
+    if err != nil {
+        // You decide: return 400? 500? Log it?
+        c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+    }
+}
+
+// vs Django REST Framework:
+# Django has built-in error serialization
+# Status codes are mapped automatically
+# Error responses are consistent
+
+// For TeslaGo:
+// This gives you freedom to implement custom error handling
+```
+
+**Weakness 5: No Admin Panel**
+
+```go
+// Gin is API-only
+// You must build your own admin UI
+
+// Django includes:
+# /admin/ portal (built-in)
+# Add records, search, filter, edit
+# Admin can use without coding
+
+// For TeslaGo:
+// Not relevant (API-only service)
+// Could build a separate admin frontend if needed
+```
+
+**Weakness 6: Smaller Community Than Django/Express**
+
+```
+Community sizes:
+├─ Django: Very large (since 2005, Python ecosystem)
+├─ Express.js: Very large (Node.js ecosystem)
+├─ Gin: Smaller but sufficient (Go's primary framework)
+├─ Fewer third-party extensions
+├─ Less Stack Overflow coverage (but growing)
+
+For TeslaGo:
+├─ Documentation is good
+├─ Community is sufficient for most needs
+├─ If stuck, Go community is helpful
+└─ Not a blocker for any use case
+```
+
+---
+
+### Q: What alternatives to Gin exist, and how do they compare?
+
+**Short Answer:**
+Main alternatives are Echo (more batteries), Fiber (extreme performance), and net/http (zero framework). Each has trade-offs. For TeslaGo, Gin is optimal.
+
+**Alternative 1: Echo**
+
+**What it is:** Similar to Gin, slightly more powerful/opinionated
+
+```go
+// Echo API (very similar to Gin)
+e := echo.New()
+e.GET("/health", handler)
+e.Group("/tesla").GET("/auth/url", handler)
+```
+
+**Comparison:**
+
+| Feature | Gin | Echo |
+|---------|-----|------|
+| **GitHub Stars** | 78,000+ | 33,000+ |
+| **Performance** | Very fast | Very fast |
+| **API Simplicity** | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ |
+| **Built-in Features** | Minimal | Slightly more (validation, binder) |
+| **Middleware** | Good | Better (grouped middleware) |
+| **Learning Curve** | Easy | Easy |
+
+**When to use Echo:**
+- If you need better middleware organization
+- If you want built-in request validation
+- If you like more "batteries included"
+
+**For TeslaGo:** Gin is simpler; Echo not justified
+
+---
+
+**Alternative 2: Fiber**
+
+**What it is:** Express.js-like API for Go (uses fasthttp instead of net/http)
+
+```go
+// Fiber API (looks like Express.js/Node.js)
+app := fiber.New()
+app.Get("/health", handler)
+app.Listen(":8080")
+```
+
+**Comparison:**
+
+| Feature | Gin | Fiber |
+|---------|-----|-------|
+| **Base Library** | net/http (standard) | fasthttp (custom) |
+| **Performance** | Very fast | Extremely fast |
+| **Express-like API** | No | Yes (familiar for Node devs) |
+| **Compatibility** | Full net/http ecosystem | Limited (fasthttp only) |
+| **Maturity** | Mature (since 2014) | Newer (growing) |
+| **Production Stability** | Stable | Stable but newer |
+
+**When to use Fiber:**
+- If you need extreme performance (rare)
+- If you're migrating from Node.js/Express
+- If you want Express-like API
+
+**For TeslaGo:** Overkill. Gin is simpler and more stable. Fiber's fasthttp adds complexity for minimal benefit.
+
+---
+
+**Alternative 3: Standard Library (net/http)**
+
+**What it is:** Use only Go's built-in HTTP package
+
+```go
+// Pure net/http (no framework)
+http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(http.StatusOK)
+    json.NewEncoder(w).Encode(result)
+})
+
+http.ListenAndServe(":8080", nil)
+```
+
+**Pros:**
+- Zero dependencies ✅
+- Full control ✅
+- Minimal overhead ✅
+- Works everywhere ✅
+
+**Cons:**
+- Lots of boilerplate ❌
+- No routing (URL string matching) ❌
+- No middleware pattern ❌
+- No request helpers ❌
+- Verbose responses ❌
+
+**TeslaGo with net/http (without Gin):**
+
+```go
+// Every handler needs this boilerplate:
+func HealthCheck(w http.ResponseWriter, r *http.Request) {
+    // Parse request manually
+    query := r.URL.Query()
+    adminID := query.Get("admin_id")
+    if adminID == "" {
+        w.Header().Set("Content-Type", "application/json")
+        w.WriteHeader(http.StatusBadRequest)
+        json.NewEncoder(w).Encode(map[string]string{"error": "required"})
+        return
+    }
+    
+    // Call service
+    result, err := service.DoSomething(r.Context(), adminID)
+    if err != nil {
+        w.Header().Set("Content-Type", "application/json")
+        w.WriteHeader(http.StatusInternalServerError)
+        json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+        return
+    }
+    
+    // Write response manually
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(http.StatusOK)
+    json.NewEncoder(w).Encode(result)
+}
+```
+
+**vs with Gin:**
+
+```go
+// With Gin (much cleaner)
+func (h *HealthHandler) HealthCheck(c *gin.Context) {
+    adminID := c.Query("admin_id")
+    if adminID == "" {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "required"})
+        return
+    }
+    
+    result, err := h.service.DoSomething(c.Request.Context(), adminID)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+        return
+    }
+    
+    c.JSON(http.StatusOK, result)
+}
+```
+
+**For TeslaGo:** Not justified. Gin saves significant boilerplate.
+
+---
+
+**Alternative 4: Django/Flask (Python)**
+
+**What it is:** Full-stack framework in Python
+
+```python
+# Django view
+from django.http import JsonResponse
+from django.views import View
+
+class HealthCheckView(View):
+    def get(self, request):
+        admin_id = request.GET.get('admin_id')
+        health = service.check_health()
+        return JsonResponse(health)
+
+# urls.py
+urlpatterns = [
+    path('health', HealthCheckView.as_view()),
+]
+```
+
+**Pros:**
+- Full-stack (ORM, admin, migrations, auth)
+- Mature ecosystem
+- Batteries included
+- Great docs
+
+**Cons:**
+- Slower (Python is 20-50x slower than Go)
+- Heavier memory footprint
+- Requires Gunicorn workers (more infrastructure)
+- Harder to scale vertically
+
+**For TeslaGo:** Rejected specifically to avoid Python's performance overhead. TeslaGo chose Go + Gin for vertical scalability.
+
+---
+
+### Q: Why is Gin the right choice for TeslaGo?
+
+**Short Answer:**
+Gin aligns perfectly with TeslaGo's requirements: performance, simplicity, Clean Architecture compatibility, minimal dependencies, and scaling capability.
+
+**Decision Criteria Analysis:**
+
+| Criterion | Score | Why |
+|-----------|-------|-----|
+| **Performance** | ✅ | Gin is very fast; handles 50k+ req/sec |
+| **Simplicity** | ✅ | Minimal framework overhead, clean API |
+| **Clean Architecture** | ✅ | No framework opinions; layers stay clean |
+| **Ecosystem Fit** | ✅ | Works great with GORM, Ginkgo, Go stdlib |
+| **Maintainability** | ✅ | Widely used, good documentation |
+| **Learning Curve** | ✅ | Handlers are intuitive, easy to onboard |
+| **Dependencies** | ✅ | Minimal, stable sub-deps |
+| **Scaling Path** | ✅ | Can grow from MVP to global service |
+
+**Scenario-Based Recommendations:**
+
+```
+If TeslaGo were Python:
+├─ Choice: Django (full-stack batteries included)
+├─ Trade-off: Heavier, less performant, faster dev
+
+If TeslaGo needed extreme performance:
+├─ Choice: Fiber (fasthttp, blazing speed)
+├─ Trade-off: More complex, newer, fasthttp compatibility
+
+If TeslaGo needed maximum simplicity:
+├─ Choice: net/http (zero dependencies)
+├─ Trade-off: More boilerplate, no routing
+
+If TeslaGo needed more batteries:
+├─ Choice: Echo (more validation, better middleware)
+├─ Trade-off: Slightly heavier, less popular
+
+If TeslaGo prioritized multi-cloud portability:
+├─ Choice: Still Gin (works anywhere)
+└─ Deployment changes, not framework
+
+ACTUAL: TeslaGo chose Gin
+└─ Perfect balance of all factors
+```
+
+---
+
+### Q: What do you need to know to run Gin in production?
+
+**Short Answer:**
+Set production mode, configure timeouts, handle graceful shutdown (TeslaGo does this), add middleware as needed. Gin handles concurrency well; the real bottleneck is usually the database.
+
+**Production Checklist:**
+
+**1. Set Production Mode**
+
+```go
+// Disables debug logging, reduces overhead
+gin.SetMode(gin.ReleaseMode)
+```
+
+**2. Configure Limits**
+
+```go
+router := gin.Default()
+router.MaxMultipartMemory = 8 << 20  // 8 MB for file uploads
+```
+
+**3. Configure Server Timeouts (TeslaGo does this)**
+
+```go
+// In cmd/api/main.go (lines 28-31)
+srv := &http.Server{
+    Addr:         fmt.Sprintf(":%s", cfg.AppPort),
+    Handler:      r,  // ← Gin engine
+    ReadTimeout:  15 * time.Second,   // Time to read request
+    WriteTimeout: 15 * time.Second,   // Time to write response
+    IdleTimeout:  60 * time.Second,   // Time before close idle connection
+}
+```
+
+**4. Graceful Shutdown (TeslaGo does this)**
+
+```go
+// In cmd/api/main.go (lines 44-52)
+quit := make(chan os.Signal, 1)
+signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+<-quit
+
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+defer cancel()
+if err := srv.Shutdown(ctx); err != nil {
+    log.Fatal("Server forced to shutdown: ", err)
+}
+```
+
+**What Gin Handles Well:**
+
+```
+✅ Concurrency — Spawns goroutines per request (efficient)
+✅ HTTP/2 — Built into net/http (Gin inherits)
+✅ TLS/HTTPS — Configure in http.Server
+✅ Compression — Can add via middleware
+✅ Rate limiting — Can add via middleware
+✅ Request ID tracking — Can add via middleware
+✅ Panic recovery — Built-in recovery middleware
+```
+
+**What You Must Add:**
+
+```
+❌ Database connection pooling — Add via GORM config
+❌ Business logic validation — Add in service layer
+❌ Error mapping — Add custom error handler
+❌ Request logging detail — Add custom logger middleware
+❌ Metrics/observability — Add Prometheus middleware
+❌ API versioning — Add via route groups
+```
+
+**Common Middleware You Might Add:**
+
+```go
+// CORS (if you have a frontend)
+r.Use(cors.Default())
+
+// Request ID (for tracing)
+r.Use(RequestIDMiddleware())
+
+// Rate limiting (if you need it)
+r.Use(limiter.Middleware())
+
+// Custom logging (if Gin's logger isn't enough)
+r.Use(CustomLoggerMiddleware())
+
+// Metrics (Prometheus, etc.)
+r.Use(prometheus.Middleware())
+```
+
+**Key File References:**
+- Server setup: `cmd/api/main.go` (lines 28-52)
+- Router setup: `internal/router/router.go` (lines 47-151)
+- Default middleware: `gin.Default()` includes logger + recovery
+
+---
+
 ## Future Categories
 
 Add new sections as you explore:
@@ -2407,6 +3446,8 @@ Add new sections as you explore:
 - [x] HTTP Server & Deployment - Architecture & Scaling ✅
 - [x] AWS Container Orchestration - ECS vs EKS ✅
 - [x] Multi-Region Architecture & Cost Analysis ✅
+- [x] Router & Dependency Injection ✅
+- [x] Gin Web Framework ✅
 - [ ] Error Handling
 - [ ] Authentication & Authorization
 - [ ] External APIs (Tesla)
