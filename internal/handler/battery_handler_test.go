@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/go-playground/validator/v10"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -69,12 +70,14 @@ var _ = Describe("BatteryHandler", func() {
 		router  *gin.Engine
 		mockSvc *mockBatteryService
 		rec     *httptest.ResponseRecorder
+		val     *validator.Validate
 	)
 
 	BeforeEach(func() {
 		gin.SetMode(gin.TestMode)
 		mockSvc = &mockBatteryService{}
-		h := handler.NewBatteryHandler(mockSvc)
+		val = validator.New()
+		h := handler.NewBatteryHandler(mockSvc, val)
 
 		router = gin.New()
 		router.GET("/tesla/vehicles/:vehicleID/battery", h.GetCurrentBattery)
@@ -275,6 +278,215 @@ var _ = Describe("BatteryHandler", func() {
 				req, _ := http.NewRequest(http.MethodPost, "/tesla/admin/prune", nil)
 				router.ServeHTTP(rec, req)
 				Expect(rec.Code).To(Equal(http.StatusInternalServerError))
+			})
+		})
+	})
+
+	// ── Validation Tests ──────────────────────────────────────────────────────
+
+	Describe("GetCurrentBattery validation", func() {
+		Context("when admin_id exceeds max length (255 chars)", func() {
+			It("returns 400", func() {
+				longAdminID := ""
+				for i := 0; i < 256; i++ {
+					longAdminID += "a"
+				}
+				req, _ := http.NewRequest(http.MethodGet, "/tesla/vehicles/5/battery?admin_id="+longAdminID, nil)
+				router.ServeHTTP(rec, req)
+				Expect(rec.Code).To(Equal(http.StatusBadRequest))
+			})
+		})
+
+		Context("when admin_id is empty", func() {
+			It("returns 400", func() {
+				req, _ := http.NewRequest(http.MethodGet, "/tesla/vehicles/5/battery?admin_id=", nil)
+				router.ServeHTTP(rec, req)
+				Expect(rec.Code).To(Equal(http.StatusBadRequest))
+			})
+		})
+
+		Context("when vehicleID is zero", func() {
+			It("returns 400", func() {
+				req, _ := http.NewRequest(http.MethodGet, "/tesla/vehicles/0/battery?admin_id=admin-1", nil)
+				router.ServeHTTP(rec, req)
+				Expect(rec.Code).To(Equal(http.StatusBadRequest))
+			})
+		})
+
+		Context("when admin_id is within bounds and vehicleID is valid", func() {
+			BeforeEach(func() {
+				mockSvc.snapshot = &model.BatterySnapshot{
+					ID:            1,
+					VehicleID:     5,
+					BatteryLevel:  80,
+					ChargingState: "Disconnected",
+					SnapshotAt:    time.Now().UTC(),
+				}
+			})
+
+			It("returns 200", func() {
+				req, _ := http.NewRequest(http.MethodGet, "/tesla/vehicles/5/battery?admin_id=admin-1", nil)
+				router.ServeHTTP(rec, req)
+				Expect(rec.Code).To(Equal(http.StatusOK))
+			})
+		})
+	})
+
+	Describe("GetBatteryHistory validation", func() {
+		Context("when vehicleID is zero", func() {
+			It("returns 400", func() {
+				startStr, endStr := validDateRange()
+				req, _ := http.NewRequest(http.MethodGet, "/tesla/vehicles/0/battery-history?start_date="+startStr+"&end_date="+endStr, nil)
+				router.ServeHTTP(rec, req)
+				Expect(rec.Code).To(Equal(http.StatusBadRequest))
+			})
+		})
+
+		Context("when both dates are missing", func() {
+			It("returns 400", func() {
+				req, _ := http.NewRequest(http.MethodGet, "/tesla/vehicles/5/battery-history", nil)
+				router.ServeHTTP(rec, req)
+				Expect(rec.Code).To(Equal(http.StatusBadRequest))
+			})
+		})
+
+		Context("when start_date has invalid format", func() {
+			It("returns 400", func() {
+				req, _ := http.NewRequest(http.MethodGet, "/tesla/vehicles/5/battery-history?start_date=invalid-date&end_date=2025-01-31T23:59:59Z", nil)
+				router.ServeHTTP(rec, req)
+				Expect(rec.Code).To(Equal(http.StatusBadRequest))
+			})
+		})
+
+		Context("when end_date has invalid format", func() {
+			It("returns 400", func() {
+				req, _ := http.NewRequest(http.MethodGet, "/tesla/vehicles/5/battery-history?start_date=2025-01-01T00:00:00Z&end_date=invalid-date", nil)
+				router.ServeHTTP(rec, req)
+				Expect(rec.Code).To(Equal(http.StatusBadRequest))
+			})
+		})
+
+		Context("when end_date is before start_date", func() {
+			It("returns 400", func() {
+				req, _ := http.NewRequest(http.MethodGet, "/tesla/vehicles/5/battery-history?start_date=2025-02-01T00:00:00Z&end_date=2025-01-01T00:00:00Z", nil)
+				router.ServeHTTP(rec, req)
+				Expect(rec.Code).To(Equal(http.StatusBadRequest))
+			})
+		})
+
+		Context("when end_date equals start_date", func() {
+			It("returns 400 (gtfield requires strictly greater)", func() {
+				req, _ := http.NewRequest(http.MethodGet, "/tesla/vehicles/5/battery-history?start_date=2025-01-01T00:00:00Z&end_date=2025-01-01T00:00:00Z", nil)
+				router.ServeHTTP(rec, req)
+				Expect(rec.Code).To(Equal(http.StatusBadRequest))
+			})
+		})
+
+		Context("when dates are valid and in correct order", func() {
+			BeforeEach(func() {
+				mockSvc.historySnaps = []model.BatterySnapshot{}
+			})
+
+			It("returns 200", func() {
+				startStr, endStr := validDateRange()
+				req, _ := http.NewRequest(http.MethodGet, "/tesla/vehicles/5/battery-history?start_date="+startStr+"&end_date="+endStr, nil)
+				router.ServeHTTP(rec, req)
+				Expect(rec.Code).To(Equal(http.StatusOK))
+			})
+		})
+	})
+
+	Describe("GetChargingLogs validation", func() {
+		Context("when vehicleID is zero", func() {
+			It("returns 400", func() {
+				startStr, endStr := validDateRange()
+				req, _ := http.NewRequest(http.MethodGet, "/tesla/vehicles/0/charging-logs?start_date="+startStr+"&end_date="+endStr, nil)
+				router.ServeHTTP(rec, req)
+				Expect(rec.Code).To(Equal(http.StatusBadRequest))
+			})
+		})
+
+		Context("when both dates are missing", func() {
+			It("returns 400", func() {
+				req, _ := http.NewRequest(http.MethodGet, "/tesla/vehicles/5/charging-logs", nil)
+				router.ServeHTTP(rec, req)
+				Expect(rec.Code).To(Equal(http.StatusBadRequest))
+			})
+		})
+
+		Context("when start_date has invalid format", func() {
+			It("returns 400", func() {
+				req, _ := http.NewRequest(http.MethodGet, "/tesla/vehicles/5/charging-logs?start_date=invalid-date&end_date=2025-01-31T23:59:59Z", nil)
+				router.ServeHTTP(rec, req)
+				Expect(rec.Code).To(Equal(http.StatusBadRequest))
+			})
+		})
+
+		Context("when end_date has invalid format", func() {
+			It("returns 400", func() {
+				req, _ := http.NewRequest(http.MethodGet, "/tesla/vehicles/5/charging-logs?start_date=2025-01-01T00:00:00Z&end_date=invalid-date", nil)
+				router.ServeHTTP(rec, req)
+				Expect(rec.Code).To(Equal(http.StatusBadRequest))
+			})
+		})
+
+		Context("when end_date is before start_date", func() {
+			It("returns 400", func() {
+				req, _ := http.NewRequest(http.MethodGet, "/tesla/vehicles/5/charging-logs?start_date=2025-02-01T00:00:00Z&end_date=2025-01-01T00:00:00Z", nil)
+				router.ServeHTTP(rec, req)
+				Expect(rec.Code).To(Equal(http.StatusBadRequest))
+			})
+		})
+
+		Context("when limit exceeds max (10000)", func() {
+			It("returns 400", func() {
+				startStr, endStr := validDateRange()
+				req, _ := http.NewRequest(http.MethodGet, "/tesla/vehicles/5/charging-logs?start_date="+startStr+"&end_date="+endStr+"&limit=10001", nil)
+				router.ServeHTTP(rec, req)
+				Expect(rec.Code).To(Equal(http.StatusBadRequest))
+			})
+		})
+
+		Context("when limit is negative", func() {
+			It("returns 400", func() {
+				startStr, endStr := validDateRange()
+				req, _ := http.NewRequest(http.MethodGet, "/tesla/vehicles/5/charging-logs?start_date="+startStr+"&end_date="+endStr+"&limit=-1", nil)
+				router.ServeHTTP(rec, req)
+				Expect(rec.Code).To(Equal(http.StatusBadRequest))
+			})
+		})
+
+		Context("when limit is within bounds (0-10000)", func() {
+			BeforeEach(func() {
+				mockSvc.chargingLogs = []model.ChargingLog{}
+			})
+
+			It("returns 200 with limit=0", func() {
+				startStr, endStr := validDateRange()
+				req, _ := http.NewRequest(http.MethodGet, "/tesla/vehicles/5/charging-logs?start_date="+startStr+"&end_date="+endStr+"&limit=0", nil)
+				router.ServeHTTP(rec, req)
+				Expect(rec.Code).To(Equal(http.StatusOK))
+			})
+
+			It("returns 200 with limit=5000", func() {
+				startStr, endStr := validDateRange()
+				req, _ := http.NewRequest(http.MethodGet, "/tesla/vehicles/5/charging-logs?start_date="+startStr+"&end_date="+endStr+"&limit=5000", nil)
+				router.ServeHTTP(rec, req)
+				Expect(rec.Code).To(Equal(http.StatusOK))
+			})
+
+			It("returns 200 with limit=10000 (max)", func() {
+				startStr, endStr := validDateRange()
+				req, _ := http.NewRequest(http.MethodGet, "/tesla/vehicles/5/charging-logs?start_date="+startStr+"&end_date="+endStr+"&limit=10000", nil)
+				router.ServeHTTP(rec, req)
+				Expect(rec.Code).To(Equal(http.StatusOK))
+			})
+
+			It("returns 200 with no limit param (defaults to 0)", func() {
+				startStr, endStr := validDateRange()
+				req, _ := http.NewRequest(http.MethodGet, "/tesla/vehicles/5/charging-logs?start_date="+startStr+"&end_date="+endStr, nil)
+				router.ServeHTTP(rec, req)
+				Expect(rec.Code).To(Equal(http.StatusOK))
 			})
 		})
 	})

@@ -29,6 +29,7 @@ package router
 
 import (
 	"github.com/gin-gonic/gin"
+	"github.com/go-playground/validator/v10"
 	"gorm.io/gorm"
 
 	extTesla "github.com/tomyogms/TeslaGo/external/tesla"
@@ -45,6 +46,10 @@ import (
 //   - db:  the shared GORM database connection (from database.Connect)
 //   - cfg: the application configuration (from config.LoadConfig)
 func SetupRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
+	// Initialize the validator once. All handlers will share this instance.
+	// Sharing the validator improves performance by avoiding repeated initialization.
+	val := validator.New()
+
 	// gin.Default() creates a Gin router with two built-in middleware:
 	//   - Logger:   logs each request (method, path, status, latency)
 	//   - Recovery: catches panics and returns 500 instead of crashing the server
@@ -81,8 +86,8 @@ func SetupRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 		cfg.TeslaTokenSecret,
 	)
 
-	// Step 4: create the handler, injecting the service.
-	teslaAuthHandler := handler.NewTeslaAuthHandler(teslaAuthService)
+	// Step 4: create the handler, injecting the service and the shared validator.
+	teslaAuthHandler := handler.NewTeslaAuthHandler(teslaAuthService, val)
 
 	// Step 5: register routes under the /tesla prefix group.
 	// r.Group("/tesla") means all routes below are automatically prefixed with /tesla.
@@ -122,7 +127,8 @@ func SetupRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 		teslaAPIClient,
 	)
 
-	batteryHandler := handler.NewBatteryHandler(batteryService)
+	// Create the handler, injecting the service and the shared validator.
+	batteryHandler := handler.NewBatteryHandler(batteryService, val)
 
 	// Vehicle-scoped battery routes. :vehicleID is our internal tesla_vehicles.id.
 	vehicles := r.Group("/tesla/vehicles/:vehicleID")

@@ -30,16 +30,43 @@ import (
 	"sync"
 
 	"github.com/gin-gonic/gin"
+	"github.com/go-playground/validator/v10"
 
 	extTesla "github.com/tomyogms/TeslaGo/external/tesla"
 	"github.com/tomyogms/TeslaGo/internal/service"
 )
 
-// TeslaAuthHandler holds the service dependency and the in-memory PKCE store.
+// Request DTOs for Tesla Auth endpoints.
+//
+// These structures define the HTTP request contracts for each endpoint.
+// Validation tags ensure invalid requests are rejected at the HTTP boundary
+// before reaching the service layer (fail fast, fail cheap principle).
+
+// GetAuthURLRequest represents the query parameters for GET /tesla/auth/url.
+type GetAuthURLRequest struct {
+	AdminID string `form:"admin_id" validate:"required,max=255"`
+}
+
+// CallbackRequest represents the query parameters for GET /tesla/auth/callback.
+type CallbackRequest struct {
+	Code  string `form:"code" validate:"required,max=1000"`
+	State string `form:"state" validate:"required,max=1000"`
+}
+
+// GetVehiclesRequest represents the query parameters for GET /tesla/vehicles.
+type GetVehiclesRequest struct {
+	AdminID string `form:"admin_id" validate:"required,max=255"`
+}
+
+// TeslaAuthHandler holds the service dependency, the in-memory PKCE store, and the validator.
 type TeslaAuthHandler struct {
 	// service is the business logic layer this handler delegates to.
 	// It is injected as an interface so tests can replace it with a mock.
 	service service.TeslaAuthService
+
+	// validator is used to validate request DTOs against validation tags.
+	// It is shared across all handler instances for efficiency.
+	validator *validator.Validate
 
 	// pkceStore is an in-memory map from composite state → code_verifier.
 	//
@@ -62,10 +89,11 @@ type TeslaAuthHandler struct {
 }
 
 // NewTeslaAuthHandler creates a new TeslaAuthHandler.
-// The service is injected here — the handler never creates its own service.
-func NewTeslaAuthHandler(svc service.TeslaAuthService) *TeslaAuthHandler {
+// The service and validator are injected here — the handler never creates its own dependencies.
+func NewTeslaAuthHandler(svc service.TeslaAuthService, val *validator.Validate) *TeslaAuthHandler {
 	return &TeslaAuthHandler{
 		service:   svc,
+		validator: val,
 		pkceStore: make(map[string]string),
 	}
 }
@@ -77,7 +105,7 @@ func NewTeslaAuthHandler(svc service.TeslaAuthService) *TeslaAuthHandler {
 // admin's browser — we don't see the username/password at any point.
 //
 // What this handler does:
-//  1. Validates admin_id is present
+//  1. Parses and validates the request DTO (admin_id query parameter)
 //  2. Generates a PKCE pair (code_verifier + code_challenge)
 //  3. Generates a random state for CSRF protection
 //  4. Combines state + admin_id into a "composite state" so we know who is
@@ -89,14 +117,22 @@ func NewTeslaAuthHandler(svc service.TeslaAuthService) *TeslaAuthHandler {
 // Response:
 //
 //	200 { "auth_url": "https://auth.tesla.com/...", "state": "abc123.admin-1" }
+//	400 { "error": "admin_id is required" }
 func (h *TeslaAuthHandler) GetAuthURL(c *gin.Context) {
-	// c.Query() reads a URL query parameter. Returns "" if not present.
-	adminID := c.Query("admin_id")
-	if adminID == "" {
-		// StatusBadRequest = 400: the client sent an invalid request.
-		c.JSON(http.StatusBadRequest, gin.H{"error": "admin_id query parameter is required"})
+	// Step 1: Parse request DTO from query parameters
+	var req GetAuthURLRequest
+	if err := c.BindQuery(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request parameters"})
 		return
 	}
+
+	// Step 2: Validate the request DTO (fail fast at HTTP boundary)
+	if err := h.validator.Struct(req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "admin_id is required and must be at most 255 characters"})
+		return
+	}
+
+	// At this point, req.AdminID is guaranteed valid (non-empty, max 255 chars)
 
 	// Generate the PKCE pair. This creates:
 	//   CodeVerifier  = 86-char random string (kept secret, stored server-side)
@@ -119,7 +155,7 @@ func (h *TeslaAuthHandler) GetAuthURL(c *gin.Context) {
 	// The '.' separator is safe here because admin_id is validated as
 	// a plain identifier (no dots). If admin IDs can contain dots, use
 	// a different encoding like base64 or a separate session store.
-	compositeState := state + "." + adminID
+	compositeState := state + "." + req.AdminID
 
 	// Store the code_verifier so Callback can retrieve it.
 	// We MUST lock the mutex before writing to the map.
@@ -146,7 +182,7 @@ func (h *TeslaAuthHandler) GetAuthURL(c *gin.Context) {
 // `state` we generated in GetAuthURL.
 //
 // What this handler does:
-//  1. Validates code and state are present
+//  1. Parses and validates the request DTO (code and state query parameters)
 //  2. Looks up and removes the code_verifier from the in-memory store
 //     (removing prevents replay attacks — the verifier can only be used once)
 //  3. Extracts admin_id from the composite state
@@ -156,21 +192,29 @@ func (h *TeslaAuthHandler) GetAuthURL(c *gin.Context) {
 // Response:
 //
 //	200 { "message": "Tesla account linked successfully", "admin_id": "...", "token_expires_at": "..." }
+//	400 { "error": "code and state are required" }
 func (h *TeslaAuthHandler) Callback(c *gin.Context) {
-	code := c.Query("code")
-	compositeState := c.Query("state")
-
-	if code == "" || compositeState == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "code and state query parameters are required"})
+	// Step 1: Parse request DTO from query parameters
+	var req CallbackRequest
+	if err := c.BindQuery(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request parameters"})
 		return
 	}
+
+	// Step 2: Validate the request DTO (fail fast at HTTP boundary)
+	if err := h.validator.Struct(req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "code and state are required"})
+		return
+	}
+
+	// At this point, req.Code and req.State are guaranteed valid (non-empty)
 
 	// Look up AND delete the code_verifier atomically.
 	// Deleting it means the same state cannot be used twice (replay prevention).
 	h.mu.Lock()
-	codeVerifier, ok := h.pkceStore[compositeState]
+	codeVerifier, ok := h.pkceStore[req.State]
 	if ok {
-		delete(h.pkceStore, compositeState)
+		delete(h.pkceStore, req.State)
 	}
 	h.mu.Unlock()
 
@@ -184,7 +228,7 @@ func (h *TeslaAuthHandler) Callback(c *gin.Context) {
 	}
 
 	// Extract admin_id from the composite state "<random>.<admin_id>".
-	adminID := extractAdminID(compositeState)
+	adminID := extractAdminID(req.State)
 	if adminID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid state format"})
 		return
@@ -194,7 +238,7 @@ func (h *TeslaAuthHandler) Callback(c *gin.Context) {
 	//  - Exchange code + verifier for tokens
 	//  - Encrypt and save tokens
 	//  - Sync vehicles
-	teslaUser, err := h.service.HandleCallback(c.Request.Context(), adminID, code, codeVerifier)
+	teslaUser, err := h.service.HandleCallback(c.Request.Context(), adminID, req.Code, codeVerifier)
 	if err != nil {
 		// We intentionally return a generic message here — we don't want to
 		// leak internal error details (e.g. DB errors) to the caller.
@@ -214,17 +258,30 @@ func (h *TeslaAuthHandler) Callback(c *gin.Context) {
 // Returns the list of Tesla vehicles stored in our database for the given admin.
 // This reads from our local database — it does NOT call the Tesla API.
 //
+// Query params:
+//   - admin_id: the admin whose Tesla vehicles to retrieve
+//
 // Response:
 //
 //	200 { "vehicles": [...], "count": 2 }
+//	400 { "error": "admin_id is required" }
 func (h *TeslaAuthHandler) GetVehicles(c *gin.Context) {
-	adminID := c.Query("admin_id")
-	if adminID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "admin_id query parameter is required"})
+	// Step 1: Parse request DTO from query parameters
+	var req GetVehiclesRequest
+	if err := c.BindQuery(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request parameters"})
 		return
 	}
 
-	vehicles, err := h.service.GetVehicles(c.Request.Context(), adminID)
+	// Step 2: Validate the request DTO (fail fast at HTTP boundary)
+	if err := h.validator.Struct(req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "admin_id is required and must be at most 255 characters"})
+		return
+	}
+
+	// At this point, req.AdminID is guaranteed valid (non-empty, max 255 chars)
+
+	vehicles, err := h.service.GetVehicles(c.Request.Context(), req.AdminID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve vehicles"})
 		return
