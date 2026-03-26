@@ -1,9 +1,8 @@
 package handler
 
 import (
+	"encoding/json"
 	"net/http"
-
-	"github.com/gin-gonic/gin"
 
 	"github.com/tomyogms/TeslaGo/internal/service"
 )
@@ -16,13 +15,17 @@ func NewHealthHandler(s service.HealthService) *HealthHandler {
 	return &HealthHandler{service: s}
 }
 
-func (h *HealthHandler) HealthCheck(c *gin.Context) {
-	health, err := h.service.CheckHealth(c.Request.Context())
+func (h *HealthHandler) HealthCheck(w http.ResponseWriter, r *http.Request) {
+	health, err := h.service.CheckHealth(r.Context())
+
+	w.Header().Set("Content-Type", "application/json")
 
 	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, health)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(health)
 		return
 	}
 
-	c.JSON(http.StatusOK, health)
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(health)
 }

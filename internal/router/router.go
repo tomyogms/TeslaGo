@@ -28,8 +28,10 @@
 package router
 
 import (
-	"github.com/gin-gonic/gin"
+	"net/http"
+
 	"github.com/go-playground/validator/v10"
+	"github.com/gorilla/mux"
 	"gorm.io/gorm"
 
 	extTesla "github.com/tomyogms/TeslaGo/external/tesla"
@@ -39,21 +41,19 @@ import (
 	"github.com/tomyogms/TeslaGo/internal/service"
 )
 
-// SetupRouter creates the Gin engine, wires all dependencies, and registers
-// all HTTP routes. It returns the fully configured engine ready to serve.
+// SetupRouter creates the Gorilla Mux router, wires all dependencies, and registers
+// all HTTP routes. It returns the fully configured router ready to serve.
 //
 // Parameters:
 //   - db:  the shared GORM database connection (from database.Connect)
 //   - cfg: the application configuration (from config.LoadConfig)
-func SetupRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
+func SetupRouter(db *gorm.DB, cfg *config.Config) *mux.Router {
 	// Initialize the validator once. All handlers will share this instance.
 	// Sharing the validator improves performance by avoiding repeated initialization.
 	val := validator.New()
 
-	// gin.Default() creates a Gin router with two built-in middleware:
-	//   - Logger:   logs each request (method, path, status, latency)
-	//   - Recovery: catches panics and returns 500 instead of crashing the server
-	r := gin.Default()
+	// Create a new Gorilla Mux router
+	r := mux.NewRouter()
 
 	// ── Health Check ─────────────────────────────────────────────────────────
 	// Wire: HealthRepository → HealthService → HealthHandler → GET /health
@@ -62,7 +62,7 @@ func SetupRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	healthRepo := repository.NewHealthRepository(db)
 	healthService := service.NewHealthService(healthRepo)
 	healthHandler := handler.NewHealthHandler(healthService)
-	r.GET("/health", healthHandler.HealthCheck)
+	r.HandleFunc("/health", healthHandler.HealthCheck).Methods(http.MethodGet)
 
 	// ── Tesla OAuth & Vehicles ───────────────────────────────────────────────
 	// Wire: TeslaRepository → TeslaAuthService (+ TeslaAPIClient) → TeslaAuthHandler
@@ -89,22 +89,18 @@ func SetupRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	// Step 4: create the handler, injecting the service and the shared validator.
 	teslaAuthHandler := handler.NewTeslaAuthHandler(teslaAuthService, val)
 
-	// Step 5: register routes under the /tesla prefix group.
-	// r.Group("/tesla") means all routes below are automatically prefixed with /tesla.
-	tesla := r.Group("/tesla")
-	{
-		// GET /tesla/auth/url?admin_id=<id>
-		// Returns the Tesla OAuth login URL. Admin opens this in their browser.
-		tesla.GET("/auth/url", teslaAuthHandler.GetAuthURL)
+	// Step 5: register routes for Tesla auth endpoints.
+	// GET /tesla/auth/url?admin_id=<id>
+	// Returns the Tesla OAuth login URL. Admin opens this in their browser.
+	r.HandleFunc("/tesla/auth/url", teslaAuthHandler.GetAuthURL).Methods(http.MethodGet)
 
-		// GET /tesla/auth/callback?code=<code>&state=<state>
-		// Tesla redirects here after the admin approves. Completes the OAuth flow.
-		tesla.GET("/auth/callback", teslaAuthHandler.Callback)
+	// GET /tesla/auth/callback?code=<code>&state=<state>
+	// Tesla redirects here after the admin approves. Completes the OAuth flow.
+	r.HandleFunc("/tesla/auth/callback", teslaAuthHandler.Callback).Methods(http.MethodGet)
 
-		// GET /tesla/vehicles?admin_id=<id>
-		// Returns the list of Tesla vehicles linked to the admin from our database.
-		tesla.GET("/vehicles", teslaAuthHandler.GetVehicles)
-	}
+	// GET /tesla/vehicles?admin_id=<id>
+	// Returns the list of Tesla vehicles linked to the admin from our database.
+	r.HandleFunc("/tesla/vehicles", teslaAuthHandler.GetVehicles).Methods(http.MethodGet)
 
 	// ── Phase 2: Battery & Charging ──────────────────────────────────────────
 	// Wire: BatteryRepository + TeslaRepository → BatteryService → BatteryHandler
@@ -130,29 +126,23 @@ func SetupRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	// Create the handler, injecting the service and the shared validator.
 	batteryHandler := handler.NewBatteryHandler(batteryService, val)
 
-	// Vehicle-scoped battery routes. :vehicleID is our internal tesla_vehicles.id.
-	vehicles := r.Group("/tesla/vehicles/:vehicleID")
-	{
-		// GET /tesla/vehicles/:vehicleID/battery?admin_id=<id>
-		// Live battery reading — calls Tesla API, saves snapshot, returns result.
-		vehicles.GET("/battery", batteryHandler.GetCurrentBattery)
+	// Vehicle-scoped battery routes. {vehicleID} is our internal tesla_vehicles.id.
+	// GET /tesla/vehicles/{vehicleID}/battery?admin_id=<id>
+	// Live battery reading — calls Tesla API, saves snapshot, returns result.
+	r.HandleFunc("/tesla/vehicles/{vehicleID}/battery", batteryHandler.GetCurrentBattery).Methods(http.MethodGet)
 
-		// GET /tesla/vehicles/:vehicleID/battery-history?start_date=&end_date=
-		// Time-series battery snapshots from our database.
-		vehicles.GET("/battery-history", batteryHandler.GetBatteryHistory)
+	// GET /tesla/vehicles/{vehicleID}/battery-history?start_date=&end_date=
+	// Time-series battery snapshots from our database.
+	r.HandleFunc("/tesla/vehicles/{vehicleID}/battery-history", batteryHandler.GetBatteryHistory).Methods(http.MethodGet)
 
-		// GET /tesla/vehicles/:vehicleID/charging-logs?start_date=&end_date=&limit=
-		// Inferred charging sessions from our database.
-		vehicles.GET("/charging-logs", batteryHandler.GetChargingLogs)
-	}
+	// GET /tesla/vehicles/{vehicleID}/charging-logs?start_date=&end_date=&limit=
+	// Inferred charging sessions from our database.
+	r.HandleFunc("/tesla/vehicles/{vehicleID}/charging-logs", batteryHandler.GetChargingLogs).Methods(http.MethodGet)
 
 	// Admin maintenance routes.
-	admin := r.Group("/tesla/admin")
-	{
-		// POST /tesla/admin/prune
-		// Deletes battery snapshots and charging logs older than 90 days.
-		admin.POST("/prune", batteryHandler.PruneOldData)
-	}
+	// POST /tesla/admin/prune
+	// Deletes battery snapshots and charging logs older than 90 days.
+	r.HandleFunc("/tesla/admin/prune", batteryHandler.PruneOldData).Methods(http.MethodPost)
 
 	return r
 }

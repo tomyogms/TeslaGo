@@ -26,10 +26,10 @@
 package handler
 
 import (
+	"encoding/json"
 	"net/http"
 	"sync"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
 
 	extTesla "github.com/tomyogms/TeslaGo/external/tesla"
@@ -118,17 +118,18 @@ func NewTeslaAuthHandler(svc service.TeslaAuthService, val *validator.Validate) 
 //
 //	200 { "auth_url": "https://auth.tesla.com/...", "state": "abc123.admin-1" }
 //	400 { "error": "admin_id is required" }
-func (h *TeslaAuthHandler) GetAuthURL(c *gin.Context) {
+func (h *TeslaAuthHandler) GetAuthURL(w http.ResponseWriter, r *http.Request) {
 	// Step 1: Parse request DTO from query parameters
 	var req GetAuthURLRequest
-	if err := c.BindQuery(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request parameters"})
-		return
-	}
+	req.AdminID = r.URL.Query().Get("admin_id")
 
 	// Step 2: Validate the request DTO (fail fast at HTTP boundary)
 	if err := h.validator.Struct(req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "admin_id is required and must be at most 255 characters"})
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "admin_id is required and must be at most 255 characters",
+		})
 		return
 	}
 
@@ -139,14 +140,22 @@ func (h *TeslaAuthHandler) GetAuthURL(c *gin.Context) {
 	//   CodeChallenge = BASE64URL(SHA256(CodeVerifier)) (sent to Tesla)
 	pkce, err := extTesla.GeneratePKCE()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate PKCE challenge"})
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "failed to generate PKCE challenge",
+		})
 		return
 	}
 
 	// Generate a random state to prevent CSRF attacks.
 	state, err := extTesla.GenerateState()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate state"})
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "failed to generate state",
+		})
 		return
 	}
 
@@ -169,7 +178,9 @@ func (h *TeslaAuthHandler) GetAuthURL(c *gin.Context) {
 
 	// Return both the URL (for redirecting the admin) and the state (so the
 	// frontend can verify it when the callback returns).
-	c.JSON(http.StatusOK, GetAuthURLResponse{
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(GetAuthURLResponse{
 		AuthURL: authURL,
 		State:   compositeState,
 	})
@@ -193,17 +204,19 @@ func (h *TeslaAuthHandler) GetAuthURL(c *gin.Context) {
 //
 //	200 { "message": "Tesla account linked successfully", "admin_id": "...", "token_expires_at": "..." }
 //	400 { "error": "code and state are required" }
-func (h *TeslaAuthHandler) Callback(c *gin.Context) {
+func (h *TeslaAuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 	// Step 1: Parse request DTO from query parameters
 	var req CallbackRequest
-	if err := c.BindQuery(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request parameters"})
-		return
-	}
+	req.Code = r.URL.Query().Get("code")
+	req.State = r.URL.Query().Get("state")
 
 	// Step 2: Validate the request DTO (fail fast at HTTP boundary)
 	if err := h.validator.Struct(req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "code and state are required"})
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "code and state are required",
+		})
 		return
 	}
 
@@ -223,14 +236,22 @@ func (h *TeslaAuthHandler) Callback(c *gin.Context) {
 	//   b) The admin waited too long and the server restarted (in-memory loss)
 	//   c) The state was already used (replay attempt)
 	if !ok {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "unknown or expired state"})
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "unknown or expired state",
+		})
 		return
 	}
 
 	// Extract admin_id from the composite state "<random>.<admin_id>".
 	adminID := extractAdminID(req.State)
 	if adminID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid state format"})
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "invalid state format",
+		})
 		return
 	}
 
@@ -238,15 +259,21 @@ func (h *TeslaAuthHandler) Callback(c *gin.Context) {
 	//  - Exchange code + verifier for tokens
 	//  - Encrypt and save tokens
 	//  - Sync vehicles
-	teslaUser, err := h.service.HandleCallback(c.Request.Context(), adminID, req.Code, codeVerifier)
+	teslaUser, err := h.service.HandleCallback(r.Context(), adminID, req.Code, codeVerifier)
 	if err != nil {
 		// We intentionally return a generic message here — we don't want to
 		// leak internal error details (e.g. DB errors) to the caller.
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to complete Tesla authentication"})
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "failed to complete Tesla authentication",
+		})
 		return
 	}
 
-	c.JSON(http.StatusOK, CallbackResponse{
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(CallbackResponse{
 		Message:        "Tesla account linked successfully",
 		AdminID:        teslaUser.AdminID,
 		TokenExpiresAt: teslaUser.TokenExpiresAt,
@@ -265,29 +292,36 @@ func (h *TeslaAuthHandler) Callback(c *gin.Context) {
 //
 //	200 { "vehicles": [...], "count": 2 }
 //	400 { "error": "admin_id is required" }
-func (h *TeslaAuthHandler) GetVehicles(c *gin.Context) {
+func (h *TeslaAuthHandler) GetVehicles(w http.ResponseWriter, r *http.Request) {
 	// Step 1: Parse request DTO from query parameters
 	var req GetVehiclesRequest
-	if err := c.BindQuery(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request parameters"})
-		return
-	}
+	req.AdminID = r.URL.Query().Get("admin_id")
 
 	// Step 2: Validate the request DTO (fail fast at HTTP boundary)
 	if err := h.validator.Struct(req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "admin_id is required and must be at most 255 characters"})
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "admin_id is required and must be at most 255 characters",
+		})
 		return
 	}
 
 	// At this point, req.AdminID is guaranteed valid (non-empty, max 255 chars)
 
-	vehicles, err := h.service.GetVehicles(c.Request.Context(), req.AdminID)
+	vehicles, err := h.service.GetVehicles(r.Context(), req.AdminID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve vehicles"})
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "failed to retrieve vehicles",
+		})
 		return
 	}
 
-	c.JSON(http.StatusOK, GetVehiclesResponse{
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(GetVehiclesResponse{
 		Vehicles: vehicles,
 		Count:    len(vehicles),
 	})

@@ -2,7 +2,7 @@
 
 A Go API that connects to the Tesla Owner API to retrieve battery status and charging logs for Tesla vehicles. Built to demonstrate **Clean Architecture** and **12-Factor App** principles in Go.
 
-**Stack:** Go · Gin · GORM · PostgreSQL · Ginkgo/Gomega · Docker
+**Stack:** Go · Gorilla Mux · GORM · PostgreSQL · Ginkgo/Gomega · Docker
 
 ---
 
@@ -182,9 +182,9 @@ go test -v ./internal/handler/...
 | `GET` | `/tesla/auth/url` | Get Tesla OAuth login URL for an admin |
 | `GET` | `/tesla/auth/callback` | OAuth callback — exchanges code, saves tokens, syncs vehicles |
 | `GET` | `/tesla/vehicles` | List all vehicles linked to an admin |
-| `GET` | `/tesla/vehicles/:vehicleID/battery` | Live battery status from Tesla API |
-| `GET` | `/tesla/vehicles/:vehicleID/battery-history` | Time-series battery snapshots from DB |
-| `GET` | `/tesla/vehicles/:vehicleID/charging-logs` | Historical charging sessions from DB |
+| `GET` | `/tesla/vehicles/{vehicleID}/battery` | Live battery status from Tesla API |
+| `GET` | `/tesla/vehicles/{vehicleID}/battery-history` | Time-series battery snapshots from DB |
+| `GET` | `/tesla/vehicles/{vehicleID}/charging-logs` | Historical charging sessions from DB |
 | `POST` | `/tesla/admin/prune` | Delete battery snapshots and charging logs older than 90 days |
 
 ### Query Parameters
@@ -205,21 +205,21 @@ go test -v ./internal/handler/...
 |---|---|---|
 | `admin_id` | Yes | `admin-1` |
 
-**`GET /tesla/vehicles/:vehicleID/battery`**
+**`GET /tesla/vehicles/{vehicleID}/battery`**
 
-`:vehicleID` is the **internal DB id** returned by `GET /tesla/vehicles` — not Tesla's external vehicle id.
+`{vehicleID}` is the **internal DB id** returned by `GET /tesla/vehicles` — not Tesla's external vehicle id.
 
 | Param | Required | Example |
 |---|---|---|
 | `admin_id` | Yes | `admin-1` |
 
-**`GET /tesla/vehicles/:vehicleID/battery-history`**
+**`GET /tesla/vehicles/{vehicleID}/battery-history`**
 | Param | Required | Example |
 |---|---|---|
 | `start_date` | Yes | `2025-01-01T00:00:00Z` |
 | `end_date` | Yes | `2025-12-31T23:59:59Z` |
 
-**`GET /tesla/vehicles/:vehicleID/charging-logs`**
+**`GET /tesla/vehicles/{vehicleID}/charging-logs`**
 | Param | Required | Example |
 |---|---|---|
 | `start_date` | Yes | `2025-01-01T00:00:00Z` |
@@ -302,7 +302,7 @@ TeslaGo/
 │   │   ├── tesla_repository.go
 │   │   └── battery_repository.go
 │   ├── router/
-│   │   └── router.go                  # Gin router — composition root, all DI wiring
+│   │   └── router.go                  # Gorilla Mux router — composition root, all DI wiring
 │   └── service/                       # Business logic (interface + implementation)
 │       ├── health_service.go
 │       ├── tesla_auth_service.go

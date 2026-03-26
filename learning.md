@@ -18,7 +18,7 @@ A quick reference organized by topic. As you explore TeslaGo, questions and lear
 - [AWS Container Orchestration - ECS vs EKS](#aws-container-orchestration---ecs-vs-eks)
 - [Multi-Region Architecture & Cost Analysis](#multi-region-architecture--cost-analysis)
 - [Router & Dependency Injection](#router--dependency-injection)
-- [Gin Web Framework](#gin-web-framework)
+- [Gorilla Mux Router](#gorilla-mux-router)
 - [Handler Request Validation & Serialization](#handler-request-validation--serialization)
 
 ---
@@ -1510,13 +1510,18 @@ server.Shutdown(ctx)  // ← Gracefully drain connections
 **2. Add Health Check Endpoint (For Load Balancer)**
 ```go
 // In your router
-router.GET("/health", func(c *gin.Context) {
+r := mux.NewRouter()
+r.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
     if isHealthy() {
-        c.JSON(200, gin.H{"status": "ok"})
+        w.Header().Set("Content-Type", "application/json")
+        w.WriteHeader(http.StatusOK)
+        json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
     } else {
-        c.JSON(503, gin.H{"status": "degraded"})
+        w.Header().Set("Content-Type", "application/json")
+        w.WriteHeader(http.StatusServiceUnavailable)
+        json.NewEncoder(w).Encode(map[string]string{"status": "degraded"})
     }
-})
+}).Methods("GET")
 ```
 
 **3. Deploy with Load Balancer**
@@ -2422,7 +2427,7 @@ Think of the router as the **app's blueprint**:
 
 ```go
 // SetupRouter (in internal/router/router.go)
-func SetupRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
+func SetupRouter(db *gorm.DB, cfg *config.Config) *mux.Router {
     // Step 1: Create repository (data access layer)
     teslaRepo := repository.NewTeslaRepository(db)
     
@@ -2433,7 +2438,8 @@ func SetupRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
     teslaHandler := handler.NewTeslaAuthHandler(teslaService)
     
     // Step 4: Register route
-    r.GET("/tesla/auth/url", teslaAuthHandler.GetAuthURL)
+    r := mux.NewRouter()
+    r.HandleFunc("/tesla/auth/url", teslaAuthHandler.GetAuthURL).Methods("GET")
     
     return r  // Done!
 }
@@ -2485,7 +2491,7 @@ func (s *TeslaAuthService) BuildAuthURL(state, codeChallenge string) string {
 }
 
 // ❌ Router is NOT a layer
-func SetupRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
+func SetupRouter(db *gorm.DB, cfg *config.Config) *mux.Router {
     // No data transformation
     // No business logic (no if/else, no decisions)
     // Just creates instances and wires them
@@ -2656,9 +2662,9 @@ VIOLATIONS PREVENTED:
    Handler only imports: service.TeslaAuthService (interface)
    Handler never sees: &teslaRepository (concrete)
 
-❌ Service CANNOT import Gin
-   Service only imports: repository.TeslaRepository (interface)
-   Service never sees: *gin.Context (HTTP detail)
+❌ Service CANNOT import Gorilla Mux
+    Service only imports: repository.TeslaRepository (interface)
+    Service never sees: http.ResponseWriter or *http.Request (HTTP detail)
 
 ❌ Repository CANNOT import HTTP
    Repository only imports: model.TeslaUser (pure data)
@@ -2672,12 +2678,12 @@ VIOLATIONS PREVENTED:
 **Example: What Clean Architecture Violation Looks Like**
 
 ```go
-// ❌ WRONG - Handler knows about GORM
+// ❌ WRONG - Handler knows about Gorilla Mux
 type TeslaAuthHandler struct {
     db *gorm.DB  // ← Handler shouldn't know GORM exists!
 }
 
-func (h *TeslaAuthHandler) GetAuthURL(c *gin.Context) {
+func (h *TeslaAuthHandler) GetAuthURL(w http.ResponseWriter, r *http.Request) {
     user := &model.TeslaUser{}
     h.db.Where("admin_id = ?", adminID).First(&user)  // ← Direct DB access
     // ...
@@ -2742,644 +2748,417 @@ func (r *teslaRepository) GetTeslaUser(ctx context.Context, adminID string) (*mo
 
 ---
 
-## Gin Web Framework
+## Gorilla Mux Router
 
-### Q: What is Gin and why was it selected for TeslaGo?
+### Q: What is Gorilla Mux and why was it selected for TeslaGo?
 
 **Short Answer:**
-Gin is a lightweight, high-performance HTTP web framework for Go. It provides convenient abstractions for routing, middleware, and request/response handling while staying close to Go's standard library. TeslaGo chose it for performance, simplicity, and alignment with Clean Architecture.
+Gorilla Mux is a powerful URL router for Go's standard library. It provides flexible routing with path parameters, methods, host matching, and middleware support while staying lightweight and dependency-minimal. TeslaGo chose it for performance, simplicity with full standard library compatibility, and Clean Architecture alignment.
 
-**What Gin Provides:**
+**What Gorilla Mux Provides:**
 
 ```go
-// 1. Routing
-r := gin.Default()
-r.GET("/health", handler.HealthCheck)
+// 1. Routing with path parameters
+r := mux.NewRouter()
+r.HandleFunc("/health", handler.HealthCheck).Methods("GET")
+r.HandleFunc("/tesla/vehicles/{vehicleID}/battery", handler.GetBattery).Methods("GET")
 
-// 2. Route Groups
-tesla := r.Group("/tesla")
+// 2. Route organization (subrouters)
+tesla := r.PathPrefix("/tesla").Subrouter()
 {
-    tesla.GET("/auth/url", handler.GetAuthURL)
-    tesla.GET("/vehicles", handler.GetVehicles)
+    tesla.HandleFunc("/auth/url", handler.GetAuthURL).Methods("GET")
+    tesla.HandleFunc("/auth/callback", handler.Callback).Methods("GET")
 }
 
 // 3. Request Parsing (query params, path params, body)
-adminID := c.Query("admin_id")        // ← Query parameter
-vehicleID := c.Param("vehicleID")     // ← Path parameter
-c.BindJSON(&body)                     // ← Request body
+adminID := r.URL.Query().Get("admin_id")           // ← Query parameter
+vars := mux.Vars(r)
+vehicleID := vars["vehicleID"]                     // ← Path parameter
+json.NewDecoder(r.Body).Decode(&body)              // ← Request body
 
-// 4. Response Formatting
-c.JSON(http.StatusOK, result)         // ← JSON response
-c.HTML(http.StatusOK, "template", data)
+// 4. Response Formatting (standard http.ResponseWriter)
+w.Header().Set("Content-Type", "application/json")
+w.WriteHeader(http.StatusOK)
+json.NewEncoder(w).Encode(result)                  // ← JSON response
 
-// 5. Middleware
-r.Use(Logger())      // Log every request
-r.Use(Recovery())    // Catch panics
+// 5. Middleware (standard Go pattern)
+r.Use(LoggerMiddleware)      // Log every request
+r.Use(RecoveryMiddleware)    // Catch panics
 ```
 
-**Why Gin for TeslaGo:**
+**Why Gorilla Mux for TeslaGo:**
 
 | Reason | Why It Matters |
 |--------|----------------|
-| **Performance** | Gin is one of the fastest Go frameworks; handles 50k+ req/sec |
-| **Simplicity** | Minimal framework overhead; clean API |
-| **Clean Architecture Friendly** | Doesn't impose opinions; works well with layered architecture |
-| **Minimal Dependencies** | ~11 sub-dependencies; small attack surface |
-| **Community Standard** | Most popular Go web framework (78k+ stars) |
-| **Scales Well** | Used by Zcash, Tencent, Gab at scale |
-| **Middleware Pattern** | Easy to add logging, rate limiting, auth |
-| **Low Barrier to Change** | Easy to swap for Echo, Fiber, or net/http if needed |
+| **Standard Library Compatible** | Works directly with `http.Handler` and `http.ResponseWriter` |
+| **Performance** | Lightweight; minimal overhead on top of net/http |
+| **Simplicity** | Clean API focused solely on routing; no opinionated patterns |
+| **Clean Architecture Friendly** | Zero framework magic; maintains separation of concerns |
+| **Minimal Dependencies** | Single package; tiny attack surface |
+| **Industry Standard** | Widely used for routing in Go APIs |
+| **Full HTTP Method Support** | Easy to restrict by method (GET, POST, etc.) |
+| **Path Parameters** | Flexible `{param}` syntax with regex support |
+| **Middleware Flexibility** | Standard Go middleware chain pattern |
 
-**Gin in TeslaGo Code:**
+**Gorilla Mux in TeslaGo Code:**
 
 ```go
-// internal/router/router.go (lines 47-51)
-func SetupRouter(db *gorm.DB, cfg *config.Config) *gin.Engine {
-    r := gin.Default()  // ← Create Gin engine with defaults
+// internal/router/router.go
+func SetupRouter(db *gorm.DB, cfg *config.Config) *mux.Router {
+    r := mux.NewRouter()  // ← Create Gorilla Mux router
     
-    // internal/handler/health_handler.go (lines 19-27)
-    func (h *HealthHandler) HealthCheck(c *gin.Context) {
-        health, err := h.service.CheckHealth(c.Request.Context())
+    // internal/handler/health_handler.go
+    func (h *HealthHandler) HealthCheck(w http.ResponseWriter, r *http.Request) {
+        health, err := h.service.CheckHealth(r.Context())
         if err != nil {
-            c.JSON(http.StatusServiceUnavailable, health)  // ← Gin's JSON helper
+            w.Header().Set("Content-Type", "application/json")
+            w.WriteHeader(http.StatusServiceUnavailable)
+            json.NewEncoder(w).Encode(health)  // ← Standard http.ResponseWriter
             return
         }
-        c.JSON(http.StatusOK, health)
+        w.Header().Set("Content-Type", "application/json")
+        w.WriteHeader(http.StatusOK)
+        json.NewEncoder(w).Encode(health)
     }
 }
 ```
 
 ---
 
-### Q: How widely used is Gin in production?
+### Q: How widely used is Gorilla Mux in production?
 
 **Short Answer:**
-Gin is the **#1 web framework in Go** by popularity and usage. It has 78,000+ GitHub stars and 50+ million monthly downloads. Used by major companies like Zcash, Gab, Tencent, and thousands of startups.
+Gorilla Mux is widely used in production across the Go ecosystem. It's the de-facto standard router for Go APIs that don't use larger frameworks. Used by companies and projects ranging from startups to enterprises that need a lightweight, composable routing solution.
 
-**Market Comparison:**
+**Why Gorilla Mux is Popular:**
 
-| Framework | GitHub Stars | Monthly Downloads | Position | Language |
-|-----------|-------------|------------------|----------|----------|
-| **Gin** | 78,000+ | 50M+ | #1 | Go |
-| **Django** | 77,000+ | 10M+ | #1 | Python |
-| **Express.js** | 65,000+ | 25M+ | #1 | Node.js |
-| **Echo** | 33,000+ | 20M+ | #2 in Go | Go |
-| **Fiber** | 35,000+ | 10M+ | #3 in Go | Go |
-| **Beego** | 31,000+ | 5M+ | #4 in Go | Go |
+1. **Proven Stability** — Maintained and used in production since 2010
+2. **Minimal Overhead** — Pure routing; no framework magic
+3. **Full Standard Library** — Works with any `http.Handler` middleware
+4. **Composable** — Easy to build on top with your own patterns
+5. **Go Ecosystem** — Works seamlessly with GORM, testing frameworks, etc.
+6. **No Lock-In** — Easy to swap components without rewriting handlers
 
-**Adoption:**
+**Common Patterns in Production:**
 
 ```
-Notable users:
-├─ Zcash (cryptocurrency) — Payment gateway
-├─ Gab (social media) — Entire platform built on Gin
-├─ Tencent (Chinese tech giant) — Internal services
-├─ Alibaba (e-commerce) — Some microservices
-└─ Thousands of startups and enterprises
+Gorilla Mux is typically used in:
+├─ Microservices (lightweight, composable)
+├─ REST APIs (method-based routing works perfectly)
+├─ GraphQL servers (common router for handling)
+├─ API gateways (Gorilla Mux is often the base)
+├─ Service-to-service APIs (minimal overhead)
+└─ Clean Architecture projects (framework-agnostic)
 ```
-
-**Why Gin is Popular:**
-
-1. **Performance** — 40x faster than Ruby on Rails, 15x faster than Python Flask
-2. **Mature** — Maintained since 2014, stable
-3. **No Lock-In** — Easy to migrate to alternatives if needed
-4. **Go Ecosystem** — Works well with GORM, testing frameworks, etc.
-5. **Company-Agnostic** — Not tied to a specific corporation
-
-**For Comparison:**
-
-- Django: Popular but tied to Python's performance limits
-- Express.js: Popular but single-threaded event loop model
-- Gin: Popular AND provides real concurrency advantages
 
 ---
 
-### Q: What are the strengths of Gin?
+### Q: What are the strengths of Gorilla Mux?
 
 **Short Answer:**
-Gin excels at performance, simplicity, minimal dependencies, middleware patterns, and Clean Architecture compatibility. It's fast, lightweight, and lets you organize code however you want.
+Gorilla Mux excels at being a lightweight, focused router that works perfectly with Go's standard library. No framework overhead, full control, and Clean Architecture alignment. You get routing without opinions.
 
-**Strength 1: Performance**
-
-```
-Benchmarks:
-├─ JSON serialization: ~500ns per operation (vs Python: 5-10µs)
-├─ Routing lookup: O(1) for most paths
-├─ Can handle 50,000+ requests/sec on single t3.medium instance
-└─ Minimal overhead — overhead is not the bottleneck
-
-For TeslaGo:
-├─ OAuth callbacks are instant
-├─ Battery queries are fast
-└─ Even under load, responses stay quick
-```
-
-**Strength 2: Simple, Intuitive API**
+**Strength 1: Standard Library Compatibility**
 
 ```go
-// Queries
-adminID := c.Query("admin_id")           // ← Very readable
-adminIDDefault := c.DefaultQuery("admin_id", "default")
-
-// Path parameters
-vehicleID := c.Param("vehicleID")
-
-// Request body
-var body struct { Name string }
-c.BindJSON(&body)
-
-// Response
-c.JSON(http.StatusOK, gin.H{"key": "value"})
-
-// vs standard library (more boilerplate):
-adminID := r.URL.Query().Get("admin_id")
-w.Header().Set("Content-Type", "application/json")
-json.NewEncoder(w).Encode(result)
+// Every handler uses standard http.ResponseWriter and *http.Request
+// This means:
+├─ Works with ALL Go middleware packages
+├─ Compatible with net/http ecosystem
+├─ No framework-specific utilities
+├─ Easy to test with httptest package
+└─ Handlers are pure Go HTTP functions
 ```
 
-**Strength 3: Minimal Dependencies**
+**Strength 2: Minimal Boilerplate**
 
 ```go
-// Gin's dependency tree:
-├─ bytedance/sonic (JSON serialization, performance-focused)
-├─ go-playground/validator (input validation)
-├─ mattn/go-isatty (terminal detection)
-└─ A few other small, stable packages
-Total: ~11 sub-dependencies
+// Gorilla Mux setup is minimal
+r := mux.NewRouter()
+r.HandleFunc("/health", handler.HealthCheck).Methods("GET")
+r.HandleFunc("/api/users/{id}", handler.GetUser).Methods("GET")
 
-// Impact:
-├─ Fast builds
-├─ Small Docker images (~15 MB with full Go stdlib)
-├─ Small attack surface (fewer things to patch)
-├─ Works in air-gapped environments
+// That's it. No configuration, no setup, no magical middleware initialization
+// Just register handlers and go
 ```
 
-**Strength 4: Middleware Pattern**
+**Strength 3: Path Parameters with Flexibility**
 
 ```go
-// TeslaGo uses built-in middleware
-r := gin.Default()  // ← Automatically includes:
-                    //   ├─ Logger middleware
-                    //   └─ Recovery middleware (panic → 500)
+// Simple path parameters
+r.HandleFunc("/users/{id}", handler.GetUser).Methods("GET")
 
-// Easy to add custom middleware
-r.Use(CustomAuthMiddleware())
-r.Use(CustomRateLimitMiddleware())
+// Regex constraints
+r.HandleFunc("/users/{id:[0-9]+}", handler.GetUser).Methods("GET")  // Only numeric IDs
 
-// Middleware can:
-├─ Log every request
-├─ Catch panics and return 500
-├─ Add headers
-├─ Rate limit
-├─ Authenticate requests
-├─ Modify requests/responses
-└─ Track performance metrics
+// Multiple parameters
+r.HandleFunc("/users/{userID}/posts/{postID}", handler.GetPost).Methods("GET")
+
+// Extract parameters in handler
+vars := mux.Vars(r)
+userID := vars["userID"]
+postID := vars["postID"]
 ```
 
-**Strength 5: Route Grouping (DRY)**
+**Strength 4: Method-Based Routing**
 
 ```go
-// TeslaGo does this
-tesla := r.Group("/tesla")
-{
-    tesla.GET("/auth/url", handler.GetAuthURL)
-    tesla.GET("/auth/callback", handler.Callback)
-}
+// Same path, different methods
+r.HandleFunc("/users", handler.ListUsers).Methods("GET")
+r.HandleFunc("/users", handler.CreateUser).Methods("POST")
+r.HandleFunc("/users/{id}", handler.UpdateUser).Methods("PUT")
+r.HandleFunc("/users/{id}", handler.DeleteUser).Methods("DELETE")
 
-vehicles := r.Group("/tesla/vehicles/:vehicleID")
-{
-    vehicles.GET("/battery", handler.GetCurrentBattery)
-    vehicles.GET("/battery-history", handler.GetBatteryHistory)
-}
+// Very clean; handler signature matches HTTP method semantics
+```
 
-// Groups can have their own middleware
-authorized := r.Group("/admin")
-authorized.Use(AuthMiddleware())
-{
-    authorized.POST("/prune", handler.Prune)
-}
+**Strength 5: Subrouters for Organization**
 
-// Clean, organized, DRY
+```go
+// TeslaGo uses this pattern
+r := mux.NewRouter()
+
+tesla := r.PathPrefix("/tesla").Subrouter()
+tesla.HandleFunc("/auth/url", handler.GetAuthURL).Methods("GET")
+tesla.HandleFunc("/auth/callback", handler.Callback).Methods("GET")
+
+vehicles := tesla.PathPrefix("/vehicles").Subrouter()
+vehicles.HandleFunc("/{vehicleID}/battery", handler.GetBattery).Methods("GET")
+vehicles.HandleFunc("/{vehicleID}/battery-history", handler.GetBatteryHistory).Methods("GET")
+
+// Hierarchical, organized, easy to maintain
 ```
 
 **Strength 6: Clean Architecture Alignment**
 
 ```
-Gin doesn't impose framework patterns:
+Gorilla Mux doesn't impose framework patterns:
 ├─ No required base classes
-├─ No annotations or tags (except JSON struct tags)
-├─ No coupling between handlers and framework
-├─ You can organize layers however you want
+├─ No annotations or framework-specific tags
+├─ No coupling between handlers and router
+├─ You organize layers however you want
 
 TeslaGo leverages this:
 ├─ Handler → Service → Repository → Model (Clean Architecture)
-├─ No Gin references in Service layer
-├─ No Gin references in Repository layer
-└─ Only HTTP layer knows about Gin
+├─ No Gorilla references in Service layer
+├─ No Gorilla references in Repository layer
+├─ Only HTTP layer knows about Gorilla Mux
 ```
 
 ---
 
-### Q: What are the weaknesses of Gin?
+### Q: What are the limitations of Gorilla Mux?
 
 **Short Answer:**
-Gin is minimal by design, which is both a strength and weakness. You must add ORM, validation, error handling, and testing utilities yourself. It's not a "batteries included" framework.
+Gorilla Mux is a router only—it doesn't provide middleware framework, serialization helpers, or built-in error handling. You implement these using standard Go patterns, which is actually a strength for Clean Architecture but requires more explicit code.
 
-**Weakness 1: Not Full-Stack**
-
-```go
-// Gin gives you routing and middleware
-// You add yourself:
-├─ ORM (TeslaGo uses GORM)
-├─ Error handling (TeslaGo implements custom)
-├─ Validation (TeslaGo validates manually)
-├─ Testing utilities (TeslaGo uses Ginkgo)
-├─ Database migrations (TeslaGo uses SQL files)
-└─ Logging (Gin has basic logger)
-
-// vs Django (full-stack):
-Django includes:
-├─ ORM (built-in)
-├─ Admin panel (built-in)
-├─ User authentication (built-in)
-├─ Migrations (auto-generated)
-├─ Form validation (built-in)
-├─ Admin UI (free)
-
-// For TeslaGo:
-// This is actually a STRENGTH
-// (enables Clean Architecture without framework opinions)
-```
-
-**Weakness 2: Minimal Production Defaults**
+**Limitation 1: No Request/Response Helpers**
 
 ```go
-// You must configure:
-gin.SetMode(gin.ReleaseMode)  // Disable debug logging
-r.MaxMultipartMemory = 8 << 20  // Upload size limits
-r.NoRoute(...)  // 404 handler
-r.NoMethod(...)  // 405 handler
-
-// vs Django:
-# Django has sensible defaults for production
-# Just set DEBUG=False and ALLOWED_HOSTS
-
-// For TeslaGo:
-// This requires intentionality, not a blocker
-```
-
-**Weakness 3: No Built-in ORM**
-
-```go
-// Gin doesn't include GORM
-// You must integrate it yourself (TeslaGo does)
-
-import "gorm.io/gorm"
-
-func setup(db *gorm.DB) {
-    repo := repository.NewTeslaRepository(db)
-    service := service.NewTeslaAuthService(repo, ...)
-    handler := handler.NewTeslaAuthHandler(service)
-    // Wire everything yourself
-}
-
-// vs Django ORM:
-# Django handles this automatically
-# models.py defines models
-# Django CLI handles everything else
-```
-
-**Weakness 4: Minimal Error Handling**
-
-```go
-// Gin has no built-in error mapping
-// You must implement error handling (TeslaGo mostly does)
-
-func (h *Handler) GetAuthURL(c *gin.Context) {
-    result, err := h.service.DoSomething()
-    if err != nil {
-        // You decide: return 400? 500? Log it?
-        c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-    }
-}
-
-// vs Django REST Framework:
-# Django has built-in error serialization
-# Status codes are mapped automatically
-# Error responses are consistent
-
-// For TeslaGo:
-// This gives you freedom to implement custom error handling
-```
-
-**Weakness 5: No Admin Panel**
-
-```go
-// Gin is API-only
-// You must build your own admin UI
-
-// Django includes:
-# /admin/ portal (built-in)
-# Add records, search, filter, edit
-# Admin can use without coding
-
-// For TeslaGo:
-// Not relevant (API-only service)
-// Could build a separate admin frontend if needed
-```
-
-**Weakness 6: Smaller Community Than Django/Express**
-
-```
-Community sizes:
-├─ Django: Very large (since 2005, Python ecosystem)
-├─ Express.js: Very large (Node.js ecosystem)
-├─ Gin: Smaller but sufficient (Go's primary framework)
-├─ Fewer third-party extensions
-├─ Less Stack Overflow coverage (but growing)
-
-For TeslaGo:
-├─ Documentation is good
-├─ Community is sufficient for most needs
-├─ If stuck, Go community is helpful
-└─ Not a blocker for any use case
-```
-
----
-
-### Q: What alternatives to Gin exist, and how do they compare?
-
-**Short Answer:**
-Main alternatives are Echo (more batteries), Fiber (extreme performance), and net/http (zero framework). Each has trade-offs. For TeslaGo, Gin is optimal.
-
-**Alternative 1: Echo**
-
-**What it is:** Similar to Gin, slightly more powerful/opinionated
-
-```go
-// Echo API (very similar to Gin)
-e := echo.New()
-e.GET("/health", handler)
-e.Group("/tesla").GET("/auth/url", handler)
-```
-
-**Comparison:**
-
-| Feature | Gin | Echo |
-|---------|-----|------|
-| **GitHub Stars** | 78,000+ | 33,000+ |
-| **Performance** | Very fast | Very fast |
-| **API Simplicity** | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ |
-| **Built-in Features** | Minimal | Slightly more (validation, binder) |
-| **Middleware** | Good | Better (grouped middleware) |
-| **Learning Curve** | Easy | Easy |
-
-**When to use Echo:**
-- If you need better middleware organization
-- If you want built-in request validation
-- If you like more "batteries included"
-
-**For TeslaGo:** Gin is simpler; Echo not justified
-
----
-
-**Alternative 2: Fiber**
-
-**What it is:** Express.js-like API for Go (uses fasthttp instead of net/http)
-
-```go
-// Fiber API (looks like Express.js/Node.js)
-app := fiber.New()
-app.Get("/health", handler)
-app.Listen(":8080")
-```
-
-**Comparison:**
-
-| Feature | Gin | Fiber |
-|---------|-----|-------|
-| **Base Library** | net/http (standard) | fasthttp (custom) |
-| **Performance** | Very fast | Extremely fast |
-| **Express-like API** | No | Yes (familiar for Node devs) |
-| **Compatibility** | Full net/http ecosystem | Limited (fasthttp only) |
-| **Maturity** | Mature (since 2014) | Newer (growing) |
-| **Production Stability** | Stable | Stable but newer |
-
-**When to use Fiber:**
-- If you need extreme performance (rare)
-- If you're migrating from Node.js/Express
-- If you want Express-like API
-
-**For TeslaGo:** Overkill. Gin is simpler and more stable. Fiber's fasthttp adds complexity for minimal benefit.
-
----
-
-**Alternative 3: Standard Library (net/http)**
-
-**What it is:** Use only Go's built-in HTTP package
-
-```go
-// Pure net/http (no framework)
-http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+// Gorilla Mux: Manual everything
+adminID := r.URL.Query().Get("admin_id")
+if adminID == "" {
     w.Header().Set("Content-Type", "application/json")
-    w.WriteHeader(http.StatusOK)
-    json.NewEncoder(w).Encode(result)
+    w.WriteHeader(http.StatusBadRequest)
+    json.NewEncoder(w).Encode(map[string]string{"error": "admin_id required"})
+    return
+}
+
+// vs Gin (framework helper):
+adminID := c.Query("admin_id")
+if adminID == "" {
+    c.JSON(http.StatusBadRequest, gin.H{"error": "admin_id required"})
+    return
+}
+
+// For TeslaGo:
+// More boilerplate, but explicit and standard
+```
+
+**Limitation 2: No Built-in Middleware Framework**
+
+```go
+// Gorilla Mux: You manage middleware chain yourself
+r := mux.NewRouter()
+r.Use(LoggerMiddleware)       // Use() is available
+r.Use(RecoveryMiddleware)
+
+// vs Gin's middleware groups:
+// Gin can attach middleware to specific route groups
+// Gorilla Mux subrouters can have their own middleware, but it's more manual
+
+// For TeslaGo:
+// This forces explicit, intentional middleware management
+```
+
+**Limitation 3: No Built-in Validation**
+
+```go
+// Gorilla Mux: Manual validation
+var req struct {
+    Email string `json:"email"`
+    Name  string `json:"name"`
+}
+if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+    // Handle JSON parse error
+    w.WriteHeader(http.StatusBadRequest)
+    return
+}
+// Manually validate fields
+if req.Email == "" {
+    w.WriteHeader(http.StatusBadRequest)
+    return
+}
+
+// For TeslaGo:
+// Validation is explicit; you see exactly what's validated
+```
+
+**Limitation 4: Larger Handlers (More Code)**
+
+```go
+// Gorilla Mux handlers tend to be longer because:
+// - Manual header setting
+// - Manual status codes
+// - Manual JSON encoding/decoding
+// - No helper functions for common patterns
+
+// For TeslaGo:
+// Trade-off: More code, but clearer intent and better for testing
+```
+
+---
+
+### Q: Gorilla Mux vs Standard net/http?
+
+**Short Answer:**
+Gorilla Mux adds smart URL routing and path parameters to net/http. net/http requires manual URL parsing. For TeslaGo's REST API, Gorilla Mux is the right choice.
+
+**Comparison:**
+
+| Feature | net/http | Gorilla Mux |
+|---------|----------|-----------|
+| **Routing** | Simple prefix match | Flexible path parameters + regex |
+| **Path Parameters** | Manual string parsing | `{id}` syntax, automatic extraction |
+| **Method Routing** | Manual (if/switch) | Built-in `.Methods()` |
+| **URL Patterns** | Limited | Rich patterns |
+| **Learning Curve** | Very easy | Easy |
+
+**net/http Example:**
+
+```go
+http.HandleFunc("/users/", func(w http.ResponseWriter, r *http.Request) {
+    // Manual path parsing
+    parts := strings.Split(r.URL.Path, "/")
+    if len(parts) < 3 {
+        http.Error(w, "Not Found", http.StatusNotFound)
+        return
+    }
+    userID := parts[2]
+    
+    // Manual method check
+    if r.Method != http.MethodGet {
+        http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+        return
+    }
+    
+    // Handle request
 })
-
-http.ListenAndServe(":8080", nil)
 ```
 
-**Pros:**
-- Zero dependencies ✅
-- Full control ✅
-- Minimal overhead ✅
-- Works everywhere ✅
-
-**Cons:**
-- Lots of boilerplate ❌
-- No routing (URL string matching) ❌
-- No middleware pattern ❌
-- No request helpers ❌
-- Verbose responses ❌
-
-**TeslaGo with net/http (without Gin):**
+**Gorilla Mux Example:**
 
 ```go
-// Every handler needs this boilerplate:
-func HealthCheck(w http.ResponseWriter, r *http.Request) {
-    // Parse request manually
-    query := r.URL.Query()
-    adminID := query.Get("admin_id")
-    if adminID == "" {
-        w.Header().Set("Content-Type", "application/json")
-        w.WriteHeader(http.StatusBadRequest)
-        json.NewEncoder(w).Encode(map[string]string{"error": "required"})
-        return
-    }
-    
-    // Call service
-    result, err := service.DoSomething(r.Context(), adminID)
-    if err != nil {
-        w.Header().Set("Content-Type", "application/json")
-        w.WriteHeader(http.StatusInternalServerError)
-        json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-        return
-    }
-    
-    // Write response manually
-    w.Header().Set("Content-Type", "application/json")
-    w.WriteHeader(http.StatusOK)
-    json.NewEncoder(w).Encode(result)
-}
+r := mux.NewRouter()
+r.HandleFunc("/users/{id}", handler.GetUser).Methods("GET")
+
+// Automatic extraction:
+// userID := mux.Vars(r)["id"]
 ```
-
-**vs with Gin:**
-
-```go
-// With Gin (much cleaner)
-func (h *HealthHandler) HealthCheck(c *gin.Context) {
-    adminID := c.Query("admin_id")
-    if adminID == "" {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "required"})
-        return
-    }
-    
-    result, err := h.service.DoSomething(c.Request.Context(), adminID)
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-        return
-    }
-    
-    c.JSON(http.StatusOK, result)
-}
-```
-
-**For TeslaGo:** Not justified. Gin saves significant boilerplate.
 
 ---
 
-**Alternative 4: Django/Flask (Python)**
-
-**What it is:** Full-stack framework in Python
-
-```python
-# Django view
-from django.http import JsonResponse
-from django.views import View
-
-class HealthCheckView(View):
-    def get(self, request):
-        admin_id = request.GET.get('admin_id')
-        health = service.check_health()
-        return JsonResponse(health)
-
-# urls.py
-urlpatterns = [
-    path('health', HealthCheckView.as_view()),
-]
-```
-
-**Pros:**
-- Full-stack (ORM, admin, migrations, auth)
-- Mature ecosystem
-- Batteries included
-- Great docs
-
-**Cons:**
-- Slower (Python is 20-50x slower than Go)
-- Heavier memory footprint
-- Requires Gunicorn workers (more infrastructure)
-- Harder to scale vertically
-
-**For TeslaGo:** Rejected specifically to avoid Python's performance overhead. TeslaGo chose Go + Gin for vertical scalability.
-
----
-
-### Q: Why is Gin the right choice for TeslaGo?
+### Q: Why is Gorilla Mux the right choice for TeslaGo?
 
 **Short Answer:**
-Gin aligns perfectly with TeslaGo's requirements: performance, simplicity, Clean Architecture compatibility, minimal dependencies, and scaling capability.
+Gorilla Mux aligns perfectly with TeslaGo's requirements: REST API routing, standard library compatibility, Clean Architecture support, and no unnecessary framework overhead.
 
 **Decision Criteria Analysis:**
 
 | Criterion | Score | Why |
 |-----------|-------|-----|
-| **Performance** | ✅ | Gin is very fast; handles 50k+ req/sec |
-| **Simplicity** | ✅ | Minimal framework overhead, clean API |
-| **Clean Architecture** | ✅ | No framework opinions; layers stay clean |
-| **Ecosystem Fit** | ✅ | Works great with GORM, Ginkgo, Go stdlib |
-| **Maintainability** | ✅ | Widely used, good documentation |
-| **Learning Curve** | ✅ | Handlers are intuitive, easy to onboard |
-| **Dependencies** | ✅ | Minimal, stable sub-deps |
-| **Scaling Path** | ✅ | Can grow from MVP to global service |
+| **REST Routing** | ✅ | Method-based routing is perfect for REST |
+| **Standard Compatibility** | ✅ | Works directly with http.Handler |
+| **Simplicity** | ✅ | Focused on routing; no bloat |
+| **Clean Architecture** | ✅ | Framework-agnostic; pure layered patterns |
+| **Performance** | ✅ | Minimal overhead; efficient routing |
+| **Maintainability** | ✅ | Widely understood; clear patterns |
+| **Middleware Flexibility** | ✅ | Works with any standard Go middleware |
+| **Testing** | ✅ | httptest works perfectly with standard handlers |
 
-**Scenario-Based Recommendations:**
+**Why NOT Other Routers:**
 
 ```
-If TeslaGo were Python:
-├─ Choice: Django (full-stack batteries included)
-├─ Trade-off: Heavier, less performant, faster dev
+If TeslaGo needed GraphQL:
+├─ Choice: Gorilla handlers + separate GraphQL lib
+├─ Trade-off: More code, but more flexible
 
-If TeslaGo needed extreme performance:
-├─ Choice: Fiber (fasthttp, blazing speed)
-├─ Trade-off: More complex, newer, fasthttp compatibility
+If TeslaGo needed RPC:
+├─ Choice: Different router pattern
+├─ Trade-off: Gorilla Mux focused on HTTP/REST
 
-If TeslaGo needed maximum simplicity:
-├─ Choice: net/http (zero dependencies)
-├─ Trade-off: More boilerplate, no routing
+If TeslaGo needed extreme performance optimization:
+├─ Choice: Chi router (slightly faster)
+├─ Trade-off: Marginal difference; Gorilla Mux is already fast
 
-If TeslaGo needed more batteries:
-├─ Choice: Echo (more validation, better middleware)
-├─ Trade-off: Slightly heavier, less popular
-
-If TeslaGo prioritized multi-cloud portability:
-├─ Choice: Still Gin (works anywhere)
-└─ Deployment changes, not framework
-
-ACTUAL: TeslaGo chose Gin
-└─ Perfect balance of all factors
+ACTUAL: TeslaGo chose Gorilla Mux
+└─ Perfect for REST APIs with Clean Architecture
 ```
 
 ---
 
-### Q: What do you need to know to run Gin in production?
+### Q: What do you need to know to run Gorilla Mux in production?
 
 **Short Answer:**
-Set production mode, configure timeouts, handle graceful shutdown (TeslaGo does this), add middleware as needed. Gin handles concurrency well; the real bottleneck is usually the database.
+Gorilla Mux itself needs minimal configuration. Focus on the http.Server setup: timeouts, graceful shutdown, and middleware for logging/recovery. TeslaGo handles this correctly.
 
 **Production Checklist:**
 
-**1. Set Production Mode**
+**1. Create Router and Register Routes**
 
 ```go
-// Disables debug logging, reduces overhead
-gin.SetMode(gin.ReleaseMode)
+r := mux.NewRouter()
+r.HandleFunc("/health", handler.HealthCheck).Methods("GET")
+// Register all routes
 ```
 
-**2. Configure Limits**
+**2. Configure Server Timeouts (TeslaGo does this)**
 
 ```go
-router := gin.Default()
-router.MaxMultipartMemory = 8 << 20  // 8 MB for file uploads
-```
-
-**3. Configure Server Timeouts (TeslaGo does this)**
-
-```go
-// In cmd/api/main.go (lines 28-31)
+// In cmd/api/main.go
 srv := &http.Server{
     Addr:         fmt.Sprintf(":%s", cfg.AppPort),
-    Handler:      r,  // ← Gin engine
+    Handler:      r,  // ← Gorilla Mux router
     ReadTimeout:  15 * time.Second,   // Time to read request
     WriteTimeout: 15 * time.Second,   // Time to write response
     IdleTimeout:  60 * time.Second,   // Time before close idle connection
 }
 ```
 
+**3. Add Middleware for Common Concerns**
+
+```go
+// Middleware stack (order matters)
+r.Use(LoggerMiddleware)       // Log all requests
+r.Use(RecoveryMiddleware)     // Catch panics
+r.Use(RequestIDMiddleware)    // Add request tracing
+r.Use(CORSMiddleware)         // CORS if needed
+```
+
 **4. Graceful Shutdown (TeslaGo does this)**
 
 ```go
-// In cmd/api/main.go (lines 44-52)
+// In cmd/api/main.go
 quit := make(chan os.Signal, 1)
 signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 <-quit
@@ -3391,52 +3170,48 @@ if err := srv.Shutdown(ctx); err != nil {
 }
 ```
 
-**What Gin Handles Well:**
+**What Gorilla Mux Handles Well:**
 
 ```
-✅ Concurrency — Spawns goroutines per request (efficient)
-✅ HTTP/2 — Built into net/http (Gin inherits)
+✅ Routing — Efficient URL matching and method routing
+✅ Path Parameters — Flexible {param} extraction
+✅ Regex Matching — Rich pattern support
+✅ Standard Library — Works with all http.Handler middleware
+✅ HTTP/2 — Inherited from net/http
 ✅ TLS/HTTPS — Configure in http.Server
-✅ Compression — Can add via middleware
-✅ Rate limiting — Can add via middleware
-✅ Request ID tracking — Can add via middleware
-✅ Panic recovery — Built-in recovery middleware
 ```
 
 **What You Must Add:**
 
 ```
-❌ Database connection pooling — Add via GORM config
-❌ Business logic validation — Add in service layer
-❌ Error mapping — Add custom error handler
-❌ Request logging detail — Add custom logger middleware
-❌ Metrics/observability — Add Prometheus middleware
-❌ API versioning — Add via route groups
+❌ Logging — Add logging middleware
+❌ Recovery — Add panic recovery middleware
+❌ Request Validation — Validate in handlers or middleware
+❌ Error Handling — Add error mapping middleware
+❌ CORS — Add CORS middleware if needed
+❌ Rate Limiting — Add rate limit middleware if needed
+❌ Metrics/Observability — Add Prometheus middleware
 ```
 
-**Common Middleware You Might Add:**
+**Common Middleware Pattern:**
 
 ```go
-// CORS (if you have a frontend)
-r.Use(cors.Default())
+// Standard Go middleware pattern
+func LoggerMiddleware(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        log.Printf("%s %s", r.Method, r.URL.Path)
+        next.ServeHTTP(w, r)
+    })
+}
 
-// Request ID (for tracing)
-r.Use(RequestIDMiddleware())
-
-// Rate limiting (if you need it)
-r.Use(limiter.Middleware())
-
-// Custom logging (if Gin's logger isn't enough)
-r.Use(CustomLoggerMiddleware())
-
-// Metrics (Prometheus, etc.)
-r.Use(prometheus.Middleware())
+// Attach to router
+r.Use(LoggerMiddleware)
 ```
 
 **Key File References:**
-- Server setup: `cmd/api/main.go` (lines 28-52)
-- Router setup: `internal/router/router.go` (lines 47-151)
-- Default middleware: `gin.Default()` includes logger + recovery
+- Server setup: `cmd/api/main.go`
+- Router setup: `internal/router/router.go`
+- Handler patterns: `internal/handler/*.go` (all use standard `(w http.ResponseWriter, r *http.Request)`)
 
 ---
 
@@ -3456,8 +3231,8 @@ The handler layer sits at the HTTP boundary. Its job is to:
 
 ```go
 // ❌ Handler doing business logic
-func (h *Handler) GetAuthURL(c *gin.Context) {
-    adminID := c.Query("admin_id")
+func (h *Handler) GetAuthURL(w http.ResponseWriter, r *http.Request) {
+    adminID := r.URL.Query().Get("admin_id")
     
     // ❌ This is business logic, not HTTP parsing!
     // It should be in the service layer
@@ -3465,21 +3240,27 @@ func (h *Handler) GetAuthURL(c *gin.Context) {
     codeChallenge := hashState(state)
     url := fmt.Sprintf("https://tesla.com/oauth?state=%s", state)
     
-    c.JSON(http.StatusOK, url)
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(http.StatusOK)
+    json.NewEncoder(w).Encode(url)
 }
 
 // ✅ Handler only doing HTTP serialization and delegation
-func (h *Handler) GetAuthURL(c *gin.Context) {
-    adminID := c.Query("admin_id")
+func (h *Handler) GetAuthURL(w http.ResponseWriter, r *http.Request) {
+    adminID := r.URL.Query().Get("admin_id")
     
     // Delegate to service (which handles state generation)
     url, err := h.service.BuildAuthURL(adminID)
     if err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+        w.Header().Set("Content-Type", "application/json")
+        w.WriteHeader(http.StatusBadRequest)
+        json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
         return
     }
     
-    c.JSON(http.StatusOK, url)
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(http.StatusOK)
+    json.NewEncoder(w).Encode(url)
 }
 ```
 
@@ -3635,30 +3416,38 @@ type CreateUserRequest struct {
 }
 
 // handler.go
-func (h *UserHandler) CreateUser(c *gin.Context) {
+func (h *UserHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
     var req CreateUserRequest
     
-    // Step 1: Deserialize (Gin's BindJSON)
-    if err := c.BindJSON(&req); err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid JSON"})
+    // Step 1: Deserialize (standard JSON decoder)
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+        w.Header().Set("Content-Type", "application/json")
+        w.WriteHeader(http.StatusBadRequest)
+        json.NewEncoder(w).Encode(map[string]string{"error": "invalid JSON"})
         return
     }
     
     // Step 2: Validate (explicit validator call)
     if err := h.validator.Struct(req); err != nil {
         // Manual error formatting (more control)
-        c.JSON(http.StatusBadRequest, formatValidationErrors(err))
+        w.Header().Set("Content-Type", "application/json")
+        w.WriteHeader(http.StatusBadRequest)
+        json.NewEncoder(w).Encode(formatValidationErrors(err))
         return
     }
     
     // Step 3: Business logic (service layer)
-    user, err := h.service.CreateUser(c.Request.Context(), req.Email, req.Name)
+    user, err := h.service.CreateUser(r.Context(), req.Email, req.Name)
     if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+        w.Header().Set("Content-Type", "application/json")
+        w.WriteHeader(http.StatusInternalServerError)
+        json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
         return
     }
     
-    c.JSON(http.StatusCreated, user)
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(http.StatusCreated)
+    json.NewEncoder(w).Encode(user)
 }
 ```
 
@@ -4589,13 +4378,17 @@ type GetBatteryHistoryResponse struct {
 
 **Handler implementation:**
 ```go
-snaps, err := h.service.GetBatteryHistory(c.Request.Context(), req.VehicleID, req.StartDate, req.EndDate)
+snaps, err := h.service.GetBatteryHistory(r.Context(), req.VehicleID, req.StartDate, req.EndDate)
 if err != nil {
-    c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve battery history"})
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(http.StatusInternalServerError)
+    json.NewEncoder(w).Encode(map[string]string{"error": "failed to retrieve battery history"})
     return
 }
 
-c.JSON(http.StatusOK, GetBatteryHistoryResponse{
+w.Header().Set("Content-Type", "application/json")
+w.WriteHeader(http.StatusOK)
+json.NewEncoder(w).Encode(GetBatteryHistoryResponse{
     Snapshots: snaps,
     Count:     len(snaps),
 })
@@ -4624,7 +4417,7 @@ It("returns battery history", func() {
 
 ### Q6: Why is this approach better than alternatives?
 
-**Alternative 1: Keep using gin.H (maps)**
+**Alternative 1: Keep using maps**
 - ❌ No type safety
 - ❌ Field names are implicit
 - ❌ No IDE support
@@ -4669,7 +4462,7 @@ Add new sections as you explore:
 - [x] AWS Container Orchestration - ECS vs EKS ✅
 - [x] Multi-Region Architecture & Cost Analysis ✅
 - [x] Router & Dependency Injection ✅
-- [x] Gin Web Framework ✅
+- [x] Gorilla Mux Router ✅
 - [x] Handler Request Validation & Serialization ✅
 - [ ] Error Handling
 - [ ] Authentication & Authorization

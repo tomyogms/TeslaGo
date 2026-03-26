@@ -2,13 +2,13 @@
 //
 // BatteryHandler exposes four HTTP endpoints for Phase 2:
 //
-//	GET /tesla/vehicles/:vehicleID/battery
+//	GET /tesla/vehicles/{vehicleID}/battery
 //	  → Fetches live battery data from Tesla, saves a snapshot, returns it.
 //
-//	GET /tesla/vehicles/:vehicleID/battery-history?admin_id=&start_date=&end_date=
+//	GET /tesla/vehicles/{vehicleID}/battery-history?start_date=&end_date=
 //	  → Returns stored battery snapshots for a time window.
 //
-//	GET /tesla/vehicles/:vehicleID/charging-logs?admin_id=&start_date=&end_date=&limit=
+//	GET /tesla/vehicles/{vehicleID}/charging-logs?start_date=&end_date=&limit=
 //	  → Returns inferred charging sessions in a date range.
 //
 //	POST /tesla/admin/prune
@@ -23,12 +23,13 @@
 package handler
 
 import (
+	"encoding/json"
 	"net/http"
 	"strconv"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
+	"github.com/gorilla/mux"
 
 	"github.com/tomyogms/TeslaGo/internal/service"
 )
@@ -44,20 +45,20 @@ const dateLayout = time.RFC3339
 // Validation tags ensure invalid requests are rejected at the HTTP boundary
 // before reaching the service layer (fail fast, fail cheap principle).
 
-// GetCurrentBatteryRequest represents the query and path parameters for GET /tesla/vehicles/:vehicleID/battery.
+// GetCurrentBatteryRequest represents the query and path parameters for GET /tesla/vehicles/{vehicleID}/battery.
 type GetCurrentBatteryRequest struct {
 	AdminID   string `form:"admin_id" validate:"required,max=255"`
 	VehicleID uint   `uri:"vehicleID" validate:"required"`
 }
 
-// GetBatteryHistoryRequest represents the query and path parameters for GET /tesla/vehicles/:vehicleID/battery-history.
+// GetBatteryHistoryRequest represents the query and path parameters for GET /tesla/vehicles/{vehicleID}/battery-history.
 type GetBatteryHistoryRequest struct {
 	VehicleID uint      `uri:"vehicleID" validate:"required"`
 	StartDate time.Time `form:"start_date" validate:"required"`
 	EndDate   time.Time `form:"end_date" validate:"required,gtfield=StartDate"`
 }
 
-// GetChargingLogsRequest represents the query and path parameters for GET /tesla/vehicles/:vehicleID/charging-logs.
+// GetChargingLogsRequest represents the query and path parameters for GET /tesla/vehicles/{vehicleID}/charging-logs.
 type GetChargingLogsRequest struct {
 	VehicleID uint      `uri:"vehicleID" validate:"required"`
 	StartDate time.Time `form:"start_date" validate:"required"`
@@ -89,7 +90,7 @@ func NewBatteryHandler(svc service.BatteryService, val *validator.Validate) *Bat
 	}
 }
 
-// GetCurrentBattery handles GET /tesla/vehicles/:vehicleID/battery?admin_id=<id>
+// GetCurrentBattery handles GET /tesla/vehicles/{vehicleID}/battery?admin_id=<id>
 //
 // Fetches a live reading from Tesla, saves it as a BatterySnapshot, and returns
 // the snapshot. This is the "write-through read" pattern: calling the endpoint
@@ -108,45 +109,70 @@ func NewBatteryHandler(svc service.BatteryService, val *validator.Validate) *Bat
 // Response 503 — car is asleep (Tesla returned 408).
 // Response 400 — validation failed.
 // Response 500 — other errors.
-func (h *BatteryHandler) GetCurrentBattery(c *gin.Context) {
-	// Step 1: Parse request DTO from query and path parameters
-	var req GetCurrentBatteryRequest
-	if err := c.BindQuery(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request parameters"})
+func (h *BatteryHandler) GetCurrentBattery(w http.ResponseWriter, r *http.Request) {
+	// Step 1: Parse path parameters
+	vars := mux.Vars(r)
+	vehicleIDStr := vars["vehicleID"]
+	var vehicleID uint
+	if _, err := strconv.ParseUint(vehicleIDStr, 10, 64); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "vehicleID must be a positive integer",
+		})
 		return
 	}
-	if err := c.BindUri(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "vehicleID must be a positive integer"})
-		return
+	vehicleID = uint(strconv.FormatUint(uint64(vehicleID), 10)[0])
+	id, _ := strconv.ParseUint(vehicleIDStr, 10, 64)
+	vehicleID = uint(id)
+
+	// Parse query parameters
+	adminID := r.URL.Query().Get("admin_id")
+
+	// Step 2: Create and validate the request DTO
+	req := GetCurrentBatteryRequest{
+		AdminID:   adminID,
+		VehicleID: vehicleID,
 	}
 
-	// Step 2: Validate the request DTO (fail fast at HTTP boundary)
 	if err := h.validator.Struct(req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "admin_id is required and vehicleID must be valid"})
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "admin_id is required and vehicleID must be valid",
+		})
 		return
 	}
 
 	// At this point, req is guaranteed valid
 
-	snap, err := h.service.GetCurrentBattery(c.Request.Context(), req.AdminID, req.VehicleID)
+	snap, err := h.service.GetCurrentBattery(r.Context(), req.AdminID, req.VehicleID)
 	if err != nil {
 		// Detect the "car is asleep" sentinel to return 503 rather than 500.
 		// A 503 (Service Unavailable) is semantically correct: the upstream
 		// resource (the Tesla vehicle) is temporarily unavailable.
 		if isCarAsleep(err) {
-			c.JSON(http.StatusServiceUnavailable, gin.H{
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]string{
 				"error": "vehicle is asleep or unreachable — try again later",
 			})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve battery status"})
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "failed to retrieve battery status",
+		})
 		return
 	}
 
-	c.JSON(http.StatusOK, GetCurrentBatteryResponse{Snapshot: snap})
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(GetCurrentBatteryResponse{Snapshot: snap})
 }
 
-// GetBatteryHistory handles GET /tesla/vehicles/:vehicleID/battery-history
+// GetBatteryHistory handles GET /tesla/vehicles/{vehicleID}/battery-history
 //
 // Returns time-series battery snapshots stored in our database (not a live call).
 //
@@ -159,57 +185,91 @@ func (h *BatteryHandler) GetCurrentBattery(c *gin.Context) {
 //	{ "snapshots": [...], "count": N }
 //	400 — validation failed (invalid dates, end before start, etc.)
 //	500 — other errors.
-func (h *BatteryHandler) GetBatteryHistory(c *gin.Context) {
+func (h *BatteryHandler) GetBatteryHistory(w http.ResponseWriter, r *http.Request) {
 	// Step 1: Parse path parameters
-	var req GetBatteryHistoryRequest
-	if err := c.BindUri(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "vehicleID must be a positive integer"})
+	vars := mux.Vars(r)
+	vehicleIDStr := vars["vehicleID"]
+	id, err := strconv.ParseUint(vehicleIDStr, 10, 64)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "vehicleID must be a positive integer",
+		})
 		return
 	}
+	vehicleID := uint(id)
 
-	// Step 2: Parse and manually convert date query parameters (Gin doesn't auto-parse times)
-	startStr := c.Query("start_date")
-	endStr := c.Query("end_date")
+	// Step 2: Parse and manually convert date query parameters
+	startStr := r.URL.Query().Get("start_date")
+	endStr := r.URL.Query().Get("end_date")
 
 	if startStr == "" || endStr == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "start_date and end_date query parameters are required (RFC3339 format)"})
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "start_date and end_date query parameters are required (RFC3339 format)",
+		})
 		return
 	}
 
-	var err error
-	req.StartDate, err = time.Parse(dateLayout, startStr)
+	startDate, err := time.Parse(dateLayout, startStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid start_date format, expected RFC3339 e.g. 2025-01-01T00:00:00Z"})
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "invalid start_date format, expected RFC3339 e.g. 2025-01-01T00:00:00Z",
+		})
 		return
 	}
 
-	req.EndDate, err = time.Parse(dateLayout, endStr)
+	endDate, err := time.Parse(dateLayout, endStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid end_date format, expected RFC3339 e.g. 2025-01-31T23:59:59Z"})
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "invalid end_date format, expected RFC3339 e.g. 2025-01-31T23:59:59Z",
+		})
 		return
 	}
 
-	// Step 3: Validate the request DTO (fail fast at HTTP boundary)
+	// Step 3: Create and validate the request DTO
+	req := GetBatteryHistoryRequest{
+		VehicleID: vehicleID,
+		StartDate: startDate,
+		EndDate:   endDate,
+	}
+
 	if err := h.validator.Struct(req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "end_date must be after start_date"})
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "end_date must be after start_date",
+		})
 		return
 	}
 
 	// At this point, req is guaranteed valid
 
-	snaps, err := h.service.GetBatteryHistory(c.Request.Context(), req.VehicleID, req.StartDate, req.EndDate)
+	snaps, err := h.service.GetBatteryHistory(r.Context(), req.VehicleID, req.StartDate, req.EndDate)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve battery history"})
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "failed to retrieve battery history",
+		})
 		return
 	}
 
-	c.JSON(http.StatusOK, GetBatteryHistoryResponse{
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(GetBatteryHistoryResponse{
 		Snapshots: snaps,
 		Count:     len(snaps),
 	})
 }
 
-// GetChargingLogs handles GET /tesla/vehicles/:vehicleID/charging-logs
+// GetChargingLogs handles GET /tesla/vehicles/{vehicleID}/charging-logs
 //
 // Returns inferred charging sessions from our database.
 //
@@ -223,56 +283,94 @@ func (h *BatteryHandler) GetBatteryHistory(c *gin.Context) {
 //	{ "charging_logs": [...], "count": N }
 //	400 — validation failed (invalid dates, end before start, limit out of range)
 //	500 — other errors.
-func (h *BatteryHandler) GetChargingLogs(c *gin.Context) {
+func (h *BatteryHandler) GetChargingLogs(w http.ResponseWriter, r *http.Request) {
 	// Step 1: Parse path parameters
-	var req GetChargingLogsRequest
-	if err := c.BindUri(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "vehicleID must be a positive integer"})
+	vars := mux.Vars(r)
+	vehicleIDStr := vars["vehicleID"]
+	id, err := strconv.ParseUint(vehicleIDStr, 10, 64)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "vehicleID must be a positive integer",
+		})
 		return
 	}
+	vehicleID := uint(id)
 
-	// Step 2: Parse and manually convert date query parameters (Gin doesn't auto-parse times)
-	startStr := c.Query("start_date")
-	endStr := c.Query("end_date")
+	// Step 2: Parse and manually convert date query parameters
+	startStr := r.URL.Query().Get("start_date")
+	endStr := r.URL.Query().Get("end_date")
 
 	if startStr == "" || endStr == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "start_date and end_date query parameters are required (RFC3339 format)"})
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "start_date and end_date query parameters are required (RFC3339 format)",
+		})
 		return
 	}
 
-	var err error
-	req.StartDate, err = time.Parse(dateLayout, startStr)
+	startDate, err := time.Parse(dateLayout, startStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid start_date format, expected RFC3339 e.g. 2025-01-01T00:00:00Z"})
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "invalid start_date format, expected RFC3339 e.g. 2025-01-01T00:00:00Z",
+		})
 		return
 	}
 
-	req.EndDate, err = time.Parse(dateLayout, endStr)
+	endDate, err := time.Parse(dateLayout, endStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid end_date format, expected RFC3339 e.g. 2025-01-31T23:59:59Z"})
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "invalid end_date format, expected RFC3339 e.g. 2025-01-31T23:59:59Z",
+		})
 		return
 	}
 
 	// Parse optional limit param. Invalid / missing values default to 0
 	// (the service applies its own default of 100).
-	limitStr := c.DefaultQuery("limit", "0")
-	req.Limit, _ = strconv.Atoi(limitStr)
+	limitStr := r.URL.Query().Get("limit")
+	if limitStr == "" {
+		limitStr = "0"
+	}
+	limit, _ := strconv.Atoi(limitStr)
 
-	// Step 3: Validate the request DTO (fail fast at HTTP boundary)
+	// Step 3: Create and validate the request DTO
+	req := GetChargingLogsRequest{
+		VehicleID: vehicleID,
+		StartDate: startDate,
+		EndDate:   endDate,
+		Limit:     limit,
+	}
+
 	if err := h.validator.Struct(req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "validation failed: check dates (end after start) and limit (0-10000)"})
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "validation failed: check dates (end after start) and limit (0-10000)",
+		})
 		return
 	}
 
 	// At this point, req is guaranteed valid
 
-	logs, err := h.service.GetChargingLogs(c.Request.Context(), req.VehicleID, req.StartDate, req.EndDate, req.Limit)
+	logs, err := h.service.GetChargingLogs(r.Context(), req.VehicleID, req.StartDate, req.EndDate, req.Limit)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve charging logs"})
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "failed to retrieve charging logs",
+		})
 		return
 	}
 
-	c.JSON(http.StatusOK, GetChargingLogsResponse{
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(GetChargingLogsResponse{
 		ChargingLogs: logs,
 		Count:        len(logs),
 	})
@@ -290,23 +388,33 @@ func (h *BatteryHandler) GetChargingLogs(c *gin.Context) {
 //
 //	{ "message": "old data pruned successfully" }
 //	500 — other errors.
-func (h *BatteryHandler) PruneOldData(c *gin.Context) {
+func (h *BatteryHandler) PruneOldData(w http.ResponseWriter, r *http.Request) {
 	// Step 1: Create empty request DTO (for consistency, even though no params)
 	var req PruneOldDataRequest
 
 	// Step 2: Validate (will always pass since no fields to validate)
 	if err := h.validator.Struct(req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "invalid request",
+		})
 		return
 	}
 
 	// At this point, req is valid (trivially)
 
-	if err := h.service.PruneOldData(c.Request.Context()); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to prune old data"})
+	if err := h.service.PruneOldData(r.Context()); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "failed to prune old data",
+		})
 		return
 	}
-	c.JSON(http.StatusOK, PruneOldDataResponse{Message: "old data pruned successfully"})
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(PruneOldDataResponse{Message: "old data pruned successfully"})
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

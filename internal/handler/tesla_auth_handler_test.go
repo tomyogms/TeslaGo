@@ -8,8 +8,8 @@ import (
 	"net/http/httptest"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
+	"github.com/gorilla/mux"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -49,22 +49,21 @@ func (m *mockTeslaAuthService) GetValidAccessToken(_ context.Context, _ string) 
 
 var _ = Describe("TeslaAuthHandler", func() {
 	var (
-		router  *gin.Engine
+		router  *mux.Router
 		mockSvc *mockTeslaAuthService
 		rec     *httptest.ResponseRecorder
 		val     *validator.Validate
 	)
 
 	BeforeEach(func() {
-		gin.SetMode(gin.TestMode)
 		mockSvc = &mockTeslaAuthService{}
 		val = validator.New()
 		h := handler.NewTeslaAuthHandler(mockSvc, val)
 
-		router = gin.New()
-		router.GET("/tesla/auth/url", h.GetAuthURL)
-		router.GET("/tesla/auth/callback", h.Callback)
-		router.GET("/tesla/vehicles", h.GetVehicles)
+		router = mux.NewRouter()
+		router.HandleFunc("/tesla/auth/url", h.GetAuthURL).Methods(http.MethodGet)
+		router.HandleFunc("/tesla/auth/callback", h.Callback).Methods(http.MethodGet)
+		router.HandleFunc("/tesla/vehicles", h.GetVehicles).Methods(http.MethodGet)
 
 		rec = httptest.NewRecorder()
 	})

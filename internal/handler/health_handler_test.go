@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"time"
 
-	"github.com/gin-gonic/gin"
+	"github.com/gorilla/mux"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -40,17 +40,16 @@ var _ = Describe("HealthHandler", func() {
 	var (
 		h           *handler.HealthHandler
 		mockService *MockHealthService
-		engine      *gin.Engine
+		router      *mux.Router
 		w           *httptest.ResponseRecorder
 		req         *http.Request
 	)
 
 	BeforeEach(func() {
-		gin.SetMode(gin.TestMode)
 		mockService = &MockHealthService{}
 		h = handler.NewHealthHandler(mockService)
-		engine = gin.New()
-		engine.GET("/health", h.HealthCheck)
+		router = mux.NewRouter()
+		router.HandleFunc("/health", h.HealthCheck).Methods(http.MethodGet)
 		w = httptest.NewRecorder()
 	})
 
@@ -58,7 +57,7 @@ var _ = Describe("HealthHandler", func() {
 		Context("when the service is healthy", func() {
 			It("should return 200 OK", func() {
 				req, _ = http.NewRequest("GET", "/health", nil)
-				engine.ServeHTTP(w, req)
+				router.ServeHTTP(w, req)
 
 				Expect(w.Code).To(Equal(http.StatusOK))
 				Expect(w.Body.String()).To(ContainSubstring("healthy"))
@@ -72,7 +71,7 @@ var _ = Describe("HealthHandler", func() {
 
 			It("should return 503 Service Unavailable", func() {
 				req, _ = http.NewRequest("GET", "/health", nil)
-				engine.ServeHTTP(w, req)
+				router.ServeHTTP(w, req)
 
 				Expect(w.Code).To(Equal(http.StatusServiceUnavailable))
 				Expect(w.Body.String()).To(ContainSubstring("unhealthy"))

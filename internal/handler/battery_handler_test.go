@@ -8,8 +8,8 @@ import (
 	"net/http/httptest"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
+	"github.com/gorilla/mux"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -67,30 +67,29 @@ func validDateRange() (string, string) {
 
 var _ = Describe("BatteryHandler", func() {
 	var (
-		router  *gin.Engine
+		router  *mux.Router
 		mockSvc *mockBatteryService
 		rec     *httptest.ResponseRecorder
 		val     *validator.Validate
 	)
 
 	BeforeEach(func() {
-		gin.SetMode(gin.TestMode)
 		mockSvc = &mockBatteryService{}
 		val = validator.New()
 		h := handler.NewBatteryHandler(mockSvc, val)
 
-		router = gin.New()
-		router.GET("/tesla/vehicles/:vehicleID/battery", h.GetCurrentBattery)
-		router.GET("/tesla/vehicles/:vehicleID/battery-history", h.GetBatteryHistory)
-		router.GET("/tesla/vehicles/:vehicleID/charging-logs", h.GetChargingLogs)
-		router.POST("/tesla/admin/prune", h.PruneOldData)
+		router = mux.NewRouter()
+		router.HandleFunc("/tesla/vehicles/{vehicleID}/battery", h.GetCurrentBattery).Methods(http.MethodGet)
+		router.HandleFunc("/tesla/vehicles/{vehicleID}/battery-history", h.GetBatteryHistory).Methods(http.MethodGet)
+		router.HandleFunc("/tesla/vehicles/{vehicleID}/charging-logs", h.GetChargingLogs).Methods(http.MethodGet)
+		router.HandleFunc("/tesla/admin/prune", h.PruneOldData).Methods(http.MethodPost)
 
 		rec = httptest.NewRecorder()
 	})
 
-	// ── GET /tesla/vehicles/:vehicleID/battery ────────────────────────────────
+	// ── GET /tesla/vehicles/{vehicleID}/battery ────────────────────────────────
 
-	Describe("GET /tesla/vehicles/:vehicleID/battery", func() {
+	Describe("GET /tesla/vehicles/{vehicleID}/battery", func() {
 		Context("when admin_id is missing", func() {
 			It("returns 400", func() {
 				req, _ := http.NewRequest(http.MethodGet, "/tesla/vehicles/5/battery", nil)
@@ -154,9 +153,9 @@ var _ = Describe("BatteryHandler", func() {
 		})
 	})
 
-	// ── GET /tesla/vehicles/:vehicleID/battery-history ────────────────────────
+	// ── GET /tesla/vehicles/{vehicleID}/battery-history ────────────────────────
 
-	Describe("GET /tesla/vehicles/:vehicleID/battery-history", func() {
+	Describe("GET /tesla/vehicles/{vehicleID}/battery-history", func() {
 		Context("when start_date or end_date is missing", func() {
 			It("returns 400 when start_date is absent", func() {
 				req, _ := http.NewRequest(http.MethodGet, "/tesla/vehicles/5/battery-history?end_date=2025-01-31T23:59:59Z", nil)
@@ -222,9 +221,9 @@ var _ = Describe("BatteryHandler", func() {
 		})
 	})
 
-	// ── GET /tesla/vehicles/:vehicleID/charging-logs ──────────────────────────
+	// ── GET /tesla/vehicles/{vehicleID}/charging-logs ──────────────────────────
 
-	Describe("GET /tesla/vehicles/:vehicleID/charging-logs", func() {
+	Describe("GET /tesla/vehicles/{vehicleID}/charging-logs", func() {
 		Context("when the service returns logs", func() {
 			BeforeEach(func() {
 				endTime := time.Now().UTC()
