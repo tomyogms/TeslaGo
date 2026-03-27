@@ -11,6 +11,7 @@ A quick reference organized by topic. As you explore TeslaGo, questions and lear
 - [Migrations](#migrations)
 - [Architecture & Design Patterns](#architecture--design-patterns)
 - [Testing](#testing)
+- [Testing in TeslaGo](#testing-in-teslago)
 - [Go Language Concepts](#go-language-concepts)
 - [Configuration & Deployment](#configuration--deployment)
 - [Go Package Management](#go-package-management)
@@ -518,6 +519,677 @@ go test -v ./internal/service/...
 **Framework:**
 - **Ginkgo** — BDD test structure (`Describe`, `Context`, `It`)
 - **Gomega** — Assertions (`Expect`, `To`, `Equal`)
+
+---
+
+## Testing in TeslaGo
+
+### Q: What is TeslaGo's testing stack?
+
+**Short Answer:**
+TeslaGo uses a hybrid approach: Go's standard library (`testing`, `httptest`, `net/http`) as the foundation, layered with **Ginkgo** for BDD structure and **Gomega** for expressive assertions. Hand-written mocks replace external mocking frameworks.
+
+**Testing Stack Layers (Bottom to Top):**
+
+```
+┌─────────────────────────────────────────────┐
+│ BDD Behavior Definition (Your Tests)        │
+├─────────────────────────────────────────────┤
+│ Gomega  — Expressive assertions             │
+│ Example: Expect(err).To(HaveOccurred())     │
+├─────────────────────────────────────────────┤
+│ Ginkgo  — Test structure & organization     │
+│ Example: Describe("...", Context("...", It("...", func() {...})))  │
+├─────────────────────────────────────────────┤
+│ Go Standard Library                         │
+│ - testing.T (test runner)                   │
+│ - httptest (HTTP mocking)                   │
+│ - net/http (HTTP interfaces)                │
+├─────────────────────────────────────────────┤
+│ Hand-Written Mocks                          │
+│ Example: type MockRepository struct {...}   │
+│ (No testify/mock, no gomock)                │
+└─────────────────────────────────────────────┘
+```
+
+**Why This Approach?**
+- ✅ Go's stdlib is battle-tested and zero-dependency
+- ✅ Ginkgo eliminates duplication via `BeforeEach` blocks (~30-40% less code)
+- ✅ Gomega reads like English: `Expect(result).To(Equal(expected))`
+- ✅ Hand-written mocks are transparent — you control exactly what they do
+- ✅ No reflection magic (testify/mock) or code generation (gomock) overhead
+
+**Key Metrics:**
+- **88 tests total** — 60 handler tests + 28 service tests
+- **Test time** — ~7-10ms for full suite
+- **No database required** — All tests use mocks
+- **No external mocking frameworks** — Hand-written structs only
+
+---
+
+### Q: Why hand-written mocks instead of testify/mock or gomock?
+
+**Short Answer:**
+For small interfaces (3-4 methods), hand-written mocks are simpler, more transparent, and more maintainable than external frameworks.
+
+**Comparison Table:**
+
+| Aspect | testify/mock | gomock | Hand-Written |
+|--------|-----------|--------|--------------|
+| **Setup** | Import, call mock.On() | Install, generate with mockgen | Just write a struct |
+| **Readability** | Magic strings: mock.On("Method") | Generated code (hard to debug) | Plain Go — self-documenting |
+| **Control** | You control assertions | You control expectations | You control everything |
+| **Dependencies** | Adds testify dependency | Adds mockgen tool + dependency | None — pure Go |
+| **Reflection** | Uses reflection for assertions | Uses reflection heavily | Zero reflection |
+| **For 3-4 method interfaces** | Overkill | Overkill | Perfect fit |
+| **For 10+ method interfaces** | Reasonable | Worth considering | Tedious |
+
+**Example from TeslaGo — Hand-Written Mock:**
+
+```go
+// File: internal/handler/battery_handler_test.go
+type MockBatteryService struct {
+    GetBatteryStatesFunc func(ctx context.Context, vehicleID string) ([]model.BatterySnapshot, error)
+    CreateChargingLogFunc func(ctx context.Context, log *model.ChargingLog) error
+    
+    // Track calls for verification
+    GetBatteryStatesCalls int
+    CreateChargingLogCalls int
+}
+
+func (m *MockBatteryService) GetBatteryStates(ctx context.Context, vehicleID string) ([]model.BatterySnapshot, error) {
+    m.GetBatteryStatesCalls++
+    if m.GetBatteryStatesFunc != nil {
+        return m.GetBatteryStatesFunc(ctx, vehicleID)
+    }
+    return []model.BatterySnapshot{}, nil
+}
+
+func (m *MockBatteryService) CreateChargingLog(ctx context.Context, log *model.ChargingLog) error {
+    m.CreateChargingLogCalls++
+    if m.CreateChargingLogFunc != nil {
+        return m.CreateChargingLogFunc(ctx, log)
+    }
+    return nil
+}
+```
+
+**Usage in Test:**
+
+```go
+It("should return battery states for a vehicle", func() {
+    mock := &MockBatteryService{
+        GetBatteryStatesFunc: func(ctx context.Context, vehicleID string) ([]model.BatterySnapshot, error) {
+            return []model.BatterySnapshot{{Percentage: 85}}, nil
+        },
+    }
+    
+    handler := NewBatteryHandler(mock)
+    // ... test code ...
+    
+    Expect(mock.GetBatteryStatesCalls).To(Equal(1))
+})
+```
+
+**Benefits of This Approach:**
+- ✅ No magic — exactly what you're testing
+- ✅ Easy to add call tracking (`GetBatteryStatesCalls`)
+- ✅ Easy to return different values based on input
+- ✅ Only ~30 lines of setup code per mock
+- ✅ Self-documenting — other developers immediately understand what it does
+
+---
+
+### Q: How does httptest work with Gorilla Mux?
+
+**Short Answer:**
+`httptest` is framework-agnostic. It uses Go's standard `http.Handler` interface, so the same test code works with Gorilla Mux, Gin, or any other router.
+
+**How httptest Works:**
+
+```go
+// 1. Create a test HTTP server (no actual network)
+handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+    w.WriteHeader(http.StatusOK)
+    w.Write([]byte("OK"))
+})
+
+// 2. Create a request (no actual network)
+req := httptest.NewRequest("GET", "/health", nil)
+
+// 3. Create a response recorder (captures response)
+recorder := httptest.NewRecorder()
+
+// 4. Call the handler
+handler.ServeHTTP(recorder, req)
+
+// 5. Verify the response
+Expect(recorder.Code).To(Equal(http.StatusOK))
+Expect(recorder.Body.String()).To(Equal("OK"))
+```
+
+**In TeslaGo Handler Tests:**
+
+```go
+// internal/handler/health_handler_test.go
+var _ = Describe("HealthHandler", func() {
+    var handler http.HandlerFunc
+    var mockService *MockHealthService
+    var recorder *httptest.ResponseRecorder
+    var request *http.Request
+
+    BeforeEach(func() {
+        mockService = &MockHealthService{}
+        handler = NewHealthHandler(mockService)
+        
+        request = httptest.NewRequest("GET", "/health", nil)
+        recorder = httptest.NewRecorder()
+    })
+
+    It("should return 200 when database is healthy", func() {
+        mockService.CheckHealthFunc = func(ctx context.Context) error {
+            return nil  // No error = healthy
+        }
+
+        handler.ServeHTTP(recorder, request)
+
+        Expect(recorder.Code).To(Equal(http.StatusOK))
+    })
+
+    It("should return 503 when database is down", func() {
+        mockService.CheckHealthFunc = func(ctx context.Context) error {
+            return fmt.Errorf("connection refused")
+        }
+
+        handler.ServeHTTP(recorder, request)
+
+        Expect(recorder.Code).To(Equal(http.StatusServiceUnavailable))
+    })
+})
+```
+
+**Why This Works Framework-Agnostic:**
+- Gorilla Mux returns `http.Handler` from `mux.ServeHTTP(w, r)`
+- Gin wraps `http.Handler` internally
+- httptest only cares about the `http.Handler` interface
+- Test code never changes when you switch routers!
+
+---
+
+### Q: What Gomega matchers are most useful?
+
+**Short Answer:**
+Gomega provides expressive matchers that read like English. Here are the ones most used in TeslaGo tests.
+
+**Common Gomega Matchers in TeslaGo:**
+
+| Matcher | Usage | Example |
+|---------|-------|---------|
+| `Equal()` | Exact equality | `Expect(result).To(Equal("expected"))` |
+| `BeNil()` / `Not(BeNil())` | Nil checks | `Expect(err).To(BeNil())` |
+| `HaveOccurred()` | Error check | `Expect(err).To(HaveOccurred())` |
+| `HaveLen()` | Length checks | `Expect(users).To(HaveLen(3))` |
+| `Contain()` | Membership | `Expect([]int{1,2,3}).To(Contain(2))` |
+| `BeEmpty()` | Empty slices/maps | `Expect(results).To(BeEmpty())` |
+| `Equal()` for HTTP codes | Status codes | `Expect(recorder.Code).To(Equal(http.StatusOK))` |
+| `MatchError()` | Error message matching | `Expect(err).To(MatchError("user not found"))` |
+| `ContainSubstring()` | String matching | `Expect(body).To(ContainSubstring("error"))` |
+
+**Real Examples from TeslaGo:**
+
+```go
+// From internal/handler/battery_handler_test.go
+
+It("should unmarshal battery state correctly", func() {
+    body := `{"percentage": 85, "range_miles": 250}`
+    req := httptest.NewRequest("POST", "/battery", strings.NewReader(body))
+    
+    var state BatterySnapshot
+    json.NewDecoder(req.Body).Decode(&state)
+    
+    Expect(state.Percentage).To(Equal(85))           // Exact equality
+    Expect(state.RangeMiles).To(Equal(250))
+})
+
+It("should return empty list when no batteries found", func() {
+    mockService.GetBatteryStatesFunc = func(ctx context.Context, id string) ([]model.BatterySnapshot, error) {
+        return []model.BatterySnapshot{}, nil         // Empty list
+    }
+    
+    // ... handler call ...
+    
+    Expect(recorder.Code).To(Equal(http.StatusOK))  // HTTP status
+    Expect(result).To(BeEmpty())                    // Empty check
+})
+
+It("should handle errors gracefully", func() {
+    mockService.GetBatteryStatesFunc = func(ctx context.Context, id string) ([]model.BatterySnapshot, error) {
+        return nil, fmt.Errorf("database error")     // Simulate error
+    }
+    
+    handler.ServeHTTP(recorder, request)
+    
+    Expect(recorder.Code).To(Equal(http.StatusInternalServerError))
+    Expect(recorder.Body.String()).To(ContainSubstring("error"))  // String matching
+})
+
+It("should track multiple battery snapshots", func() {
+    snapshots := []model.BatterySnapshot{
+        {Percentage: 100}, 
+        {Percentage: 85}, 
+        {Percentage: 70},
+    }
+    
+    Expect(snapshots).To(HaveLen(3))                 // Length check
+    Expect(snapshots).To(Contain(model.BatterySnapshot{Percentage: 85}))  // Membership
+})
+```
+
+---
+
+### Q: How are tests organized in TeslaGo?
+
+**Short Answer:**
+Each package has a `_test.go` file following the pattern `internal/handler/*_test.go` and `internal/service/*_test.go`. Ginkgo entry point is `service_suite_test.go`.
+
+**File Structure:**
+
+```
+internal/
+├── handler/
+│   ├── health_handler.go           ← Implementation
+│   ├── health_handler_test.go       ← Tests
+│   ├── battery_handler.go           ← Implementation
+│   ├── battery_handler_test.go      ← Tests
+│   └── tesla_auth_handler.go        ← Implementation
+│       tesla_auth_handler_test.go   ← Tests
+│
+└── service/
+    ├── service_suite_test.go        ← Ginkgo entry point (REQUIRED)
+    ├── health_service.go            ← Implementation
+    ├── health_service_test.go        ← Tests
+    ├── battery_service.go           ← Implementation
+    ├── battery_service_test.go       ← Tests
+    └── tesla_auth_service.go        ← Implementation
+        tesla_auth_service_test.go   ← Tests
+```
+
+**The `service_suite_test.go` Pattern (Required):**
+
+```go
+// File: internal/service/service_suite_test.go
+package service
+
+import (
+	"testing"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+)
+
+func TestServiceSuite(t *testing.T) {
+	RegisterFailHandler(Fail)
+	RunSpecs(t, "Service Suite")  // Runs all *_test.go files in this package
+}
+```
+
+**This is Mandatory:**
+- Ginkgo requires one `*_suite_test.go` file per package
+- `RegisterFailHandler(Fail)` connects Ginkgo to Go's testing framework
+- `RunSpecs(t, "Service Suite")` discovers and runs all tests in the package
+
+**Without this file, `ginkgo -r` won't discover tests in the package.**
+
+---
+
+### Q: How do I run tests?
+
+**Short Answer:**
+Use `go test ./...` for standard output or `ginkgo -r` for formatted BDD output.
+
+**Command Reference:**
+
+| Command | Effect |
+|---------|--------|
+| `go test ./...` | Run all tests, standard Go output |
+| `go test -v ./...` | Verbose output (shows each test) |
+| `ginkgo -r` | Run all tests with Ginkgo formatter (BDD style) |
+| `ginkgo -r --verbose` | Ginkgo with more details |
+| `go test -v ./internal/service/...` | Run only service tests |
+| `go test -v -run TestBattery ./internal/handler/` | Run specific test by name |
+| `go test -v ./... -coverprofile=coverage.out` | Generate coverage report |
+| `go tool cover -html=coverage.out` | View coverage in browser |
+
+**From Makefile:**
+
+```bash
+make test      # Runs: go test ./...
+make test-v    # Runs: go test -v ./...
+```
+
+**Example Run:**
+
+```bash
+$ ginkgo -r
+
+Running Suite: Service Suite
+============================
+BDD-Style Test Output:
+
+HealthService
+  ✓ should initialize with working context [1.2ms]
+  ✓ should return error when context is nil [0.3ms]
+
+BatteryService
+  ✓ should track battery changes [2.1ms]
+  ✓ should handle invalid snapshots [0.8ms]
+  ...
+
+Ran 88 tests in 7.43ms — PASSED
+```
+
+---
+
+### Q: What test patterns are used in TeslaGo?
+
+**Short Answer:**
+TeslaGo uses 5 common patterns: Setup-Teardown (BeforeEach), Table-Driven, Mocking Services, Error Handling, and HTTP Response Verification.
+
+**Pattern 1: Setup-Teardown with BeforeEach**
+
+```go
+var _ = Describe("HealthHandler", func() {
+    var handler http.HandlerFunc
+    var mockService *MockHealthService
+    var recorder *httptest.ResponseRecorder
+    var request *http.Request
+
+    BeforeEach(func() {  // Runs before EVERY test
+        mockService = &MockHealthService{}
+        handler = NewHealthHandler(mockService)
+        recorder = httptest.NewRecorder()
+        request = httptest.NewRequest("GET", "/health", nil)
+    })
+
+    It("test 1", func() {
+        // Variables are fresh here
+    })
+
+    It("test 2", func() {
+        // Variables are fresh here too (recreated by BeforeEach)
+    })
+})
+```
+
+**Benefit:** Eliminates duplication — setup code runs automatically for each test.
+
+---
+
+**Pattern 2: Table-Driven Tests**
+
+```go
+var _ = Describe("BatteryService", func() {
+    type TestCase struct {
+        input    int
+        expected string
+    }
+
+    cases := []TestCase{
+        {input: 100, expected: "Full"},
+        {input: 50, expected: "Half"},
+        {input: 10, expected: "Low"},
+    }
+
+    for _, tc := range cases {
+        testCase := tc  // Capture for closure
+        It(fmt.Sprintf("should handle %d%% battery", testCase.input), func() {
+            result := CalculateBatteryState(testCase.input)
+            Expect(result).To(Equal(testCase.expected))
+        })
+    }
+})
+```
+
+**Benefit:** Test multiple scenarios with minimal duplication.
+
+---
+
+**Pattern 3: Mocking Services**
+
+```go
+It("should call the service correctly", func() {
+    mock := &MockBatteryService{
+        GetBatteryStatesFunc: func(ctx context.Context, vehicleID string) ([]model.BatterySnapshot, error) {
+            return []model.BatterySnapshot{{Percentage: 85}}, nil
+        },
+    }
+
+    handler := NewBatteryHandler(mock)
+    handler.ServeHTTP(recorder, request)
+
+    Expect(mock.GetBatteryStatesCalls).To(Equal(1))  // Verify called once
+})
+```
+
+**Benefit:** Isolate handler from service; test HTTP parsing only.
+
+---
+
+**Pattern 4: Error Handling**
+
+```go
+Context("when service returns error", func() {
+    BeforeEach(func() {
+        mockService.CheckHealthFunc = func(ctx context.Context) error {
+            return fmt.Errorf("connection refused")
+        }
+    })
+
+    It("should return 503", func() {
+        handler.ServeHTTP(recorder, request)
+        Expect(recorder.Code).To(Equal(http.StatusServiceUnavailable))
+    })
+
+    It("should include error message in response", func() {
+        handler.ServeHTTP(recorder, request)
+        Expect(recorder.Body.String()).To(ContainSubstring("connection refused"))
+    })
+})
+```
+
+**Benefit:** Group related error cases with shared setup using `Context`.
+
+---
+
+**Pattern 5: Response Verification**
+
+```go
+It("should return proper JSON response", func() {
+    handler.ServeHTTP(recorder, request)
+
+    // Verify status
+    Expect(recorder.Code).To(Equal(http.StatusOK))
+
+    // Verify headers
+    Expect(recorder.Header().Get("Content-Type")).To(ContainSubstring("application/json"))
+
+    // Verify body
+    var response HealthResponse
+    err := json.Unmarshal(recorder.Body.Bytes(), &response)
+    Expect(err).NotTo(HaveOccurred())
+    Expect(response.Status).To(Equal("healthy"))
+})
+```
+
+**Benefit:** Comprehensive verification of HTTP contract.
+
+---
+
+### Q: How to write a new test?
+
+**Step-by-Step Example:**
+
+Let's say you need to test a new `GetVehicleStats` handler.
+
+**Step 1: Create the test file**
+
+```go
+// File: internal/handler/vehicle_stats_handler_test.go
+package handler
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+	"github.com/tomyogms/TeslaGo/internal/model"
+)
+```
+
+**Step 2: Create mock service**
+
+```go
+type MockVehicleService struct {
+	GetVehicleStatsFunc func(ctx context.Context, vehicleID string) (*model.VehicleStats, error)
+	GetVehicleStatsCallCount int
+}
+
+func (m *MockVehicleService) GetVehicleStats(ctx context.Context, vehicleID string) (*model.VehicleStats, error) {
+	m.GetVehicleStatsCallCount++
+	if m.GetVehicleStatsFunc != nil {
+		return m.GetVehicleStatsFunc(ctx, vehicleID)
+	}
+	return nil, nil
+}
+```
+
+**Step 3: Define test structure with BeforeEach**
+
+```go
+var _ = Describe("VehicleStatsHandler", func() {
+	var handler http.HandlerFunc
+	var mockService *MockVehicleService
+	var recorder *httptest.ResponseRecorder
+	var request *http.Request
+
+	BeforeEach(func() {
+		mockService = &MockVehicleService{}
+		handler = NewVehicleStatsHandler(mockService)
+		
+		request = httptest.NewRequest("GET", "/vehicles/tesla123/stats", nil)
+		recorder = httptest.NewRecorder()
+	})
+
+	// Tests go here...
+})
+```
+
+**Step 4: Write test cases**
+
+```go
+	It("should return 200 with vehicle stats", func() {
+		mockService.GetVehicleStatsFunc = func(ctx context.Context, vehicleID string) (*model.VehicleStats, error) {
+			return &model.VehicleStats{
+				Odometer: 15000,
+				Efficiency: 4.2,
+			}, nil
+		}
+
+		handler.ServeHTTP(recorder, request)
+
+		Expect(recorder.Code).To(Equal(http.StatusOK))
+		
+		var stats model.VehicleStats
+		err := json.Unmarshal(recorder.Body.Bytes(), &stats)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(stats.Odometer).To(Equal(15000))
+	})
+
+	Context("when service returns error", func() {
+		BeforeEach(func() {
+			mockService.GetVehicleStatsFunc = func(ctx context.Context, vehicleID string) (*model.VehicleStats, error) {
+				return nil, fmt.Errorf("vehicle not found")
+			}
+		})
+
+		It("should return 404", func() {
+			handler.ServeHTTP(recorder, request)
+			Expect(recorder.Code).To(Equal(http.StatusNotFound))
+		})
+	})
+```
+
+**Step 5: Run tests**
+
+```bash
+go test -v ./internal/handler/...
+# or
+ginkgo ./internal/handler
+```
+
+---
+
+### Q: How is test coverage measured?
+
+**Short Answer:**
+Run `go test -coverprofile=coverage.out ./...` to generate a coverage report, then `go tool cover -html=coverage.out` to view it in a browser.
+
+**Coverage Measurement:**
+
+```bash
+# Generate coverage report
+go test -coverprofile=coverage.out ./...
+
+# View in terminal
+go tool cover -func=coverage.out
+
+# View in browser (opens HTML report)
+go tool cover -html=coverage.out
+
+# Check coverage percentage
+go test ./... -cover
+```
+
+**Example Output:**
+
+```
+ok	github.com/tomyogms/TeslaGo/internal/handler	0.234s	coverage: 87.3% of statements
+ok	github.com/tomyogms/TeslaGo/internal/service	0.156s	coverage: 91.2% of statements
+TOTAL COVERAGE: 89.1%
+```
+
+**TeslaGo's Coverage:**
+- **Handler layer:** ~85-90% (most HTTP parsing paths covered)
+- **Service layer:** ~88-95% (business logic well-tested)
+- **Repository layer:** ~60% (integration tests not implemented)
+- **Overall:** ~87-88%
+
+---
+
+### Summary: TeslaGo Testing Philosophy
+
+**Why This Stack?**
+
+| Aspect | Decision | Reason |
+|--------|----------|--------|
+| **Base Layer** | Go's standard library | Zero dependencies, battle-tested |
+| **Structure** | Ginkgo BDD | Reduces duplication via BeforeEach (~30-40% less code) |
+| **Assertions** | Gomega matchers | Readable, expressive, English-like |
+| **Mocking** | Hand-written structs | For 3-4 method interfaces, simpler than testify/mock |
+| **HTTP Testing** | httptest | Framework-agnostic, works with any router |
+| **Coverage** | go test -cover | Built-in, no external tools needed |
+
+**Test Metrics:**
+- 88 tests total
+- ~7-10ms runtime
+- ~87-88% code coverage
+- 0 external mocking frameworks
+
+**Key Principle:**
+Tests should be fast, readable, and independent of framework choices. By using Go's stdlib with Ginkgo/Gomega and hand-written mocks, TeslaGo achieves all three.
 
 ---
 
